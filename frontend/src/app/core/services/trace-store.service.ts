@@ -94,7 +94,7 @@ export class TraceStoreService {
       .slice(0, upTo + 1)
       .filter(isStdoutEvent)
       .map((e) => e.text)
-      .join('');
+      .join('\n');
   });
 
   setStatus(status: ExecutionStatus): void {

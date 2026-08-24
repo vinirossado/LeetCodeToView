@@ -32,6 +32,14 @@ pub static mut FATAL_ERROR: bool = false;
 // uninstrumented, exactly like the JDI side.
 pub static mut STEP_EVENTS_EMITTED: u32 = 0;
 pub static mut STEP_CAPPED: bool = false;
+// Same indirection reason as STEP_SINK/ERROR_SINK above (this file is
+// shared with the legacy icordebug-spike binary, which has no `pdb` module
+// to call directly) — csharp::run_worker sets this to a plain `fn` (no
+// captured state, loads the PDB once up front) that maps
+// (method token, IL offset) -> {slot index -> real variable name}. `None`
+// (the icordebug-spike default, and csharp.rs's own fallback when no .pdb
+// was found) means extract_locals keeps using positional `local_N` keys.
+pub static mut LOCAL_NAME_RESOLVER: Option<fn(u32, u32) -> BTreeMap<u32, String>> = None;
 
 unsafe fn report_error(message: String) {
     FATAL_ERROR = true;
@@ -896,9 +904,13 @@ unsafe extern "C" fn cb_step_complete(
     if !STEP_CAPPED {
         if let Ok(frame) = get_active_frame(thread) {
             if let Ok(il_frame) = query_interface(frame, &IID_ICORDEBUG_IL_FRAME) {
-                let line = get_il_offset(il_frame).map(|o| o as i64).unwrap_or(-1);
+                let offset = get_il_offset(il_frame).unwrap_or(0);
+                let line = offset as i64;
                 let stack = get_call_stack_names(il_frame);
-                let locals = extract_locals(il_frame);
+                let method_token = get_function(il_frame)
+                    .and_then(|func| get_function_token(func))
+                    .unwrap_or(0);
+                let locals = extract_locals(il_frame, method_token, offset);
                 if let Some(sink) = STEP_SINK {
                     sink(line, locals, stack);
                 }
@@ -928,6 +940,16 @@ const ELEMENT_TYPE_STRING: i32 = 0xE;
 const ELEMENT_TYPE_ARRAY: i32 = 0x14;
 const ELEMENT_TYPE_SZARRAY: i32 = 0x1D;
 
+/// Cap on array elements serialized per local, same value as Java's
+/// MAX_ARRAY_ELEMENTS (jdi/Debugger.java::serializeValue) — kept in sync
+/// deliberately, so a large array doesn't produce a wildly different
+/// payload size just because of which language ran it. C# doesn't need
+/// Java's MAX_DEPTH/MAX_FIELDS/cycle-detection machinery yet: locals here
+/// are only primitives/strings/flat arrays (no generic-object field
+/// serialization — see tasks.md "Fase 2", explicitly out of scope), so
+/// there's no recursion depth to cap, only the element count.
+const MAX_ARRAY_ELEMENTS: u32 = 20;
+
 /// Dereferencia um valor por referência (string, array, objeto): IsNull +
 /// Dereference, retornando o ICorDebugValue de verdade por trás do ponteiro.
 unsafe fn dereference_value(value: *mut c_void) -> Result<Option<*mut c_void>, HResult> {
@@ -940,17 +962,22 @@ unsafe fn dereference_value(value: *mut c_void) -> Result<Option<*mut c_void>, H
 
 /// Enumera as variáveis locais do frame (índice 0, 1, 2, ... até
 /// GetLocalVariable falhar — sinal de que passou do fim da lista de locals
-/// da assinatura do método). Chave é "local_N": sem PDB não há nome de
-/// variável disponível via nenhuma API COM (ver find_entry_point_token e
-/// spec.md), só índice + tipo/valor.
-pub unsafe fn extract_locals(il_frame: *mut c_void) -> BTreeMap<String, serde_json::Value> {
+/// da assinatura do método). Chave é o nome real da variável, resolvido via
+/// LOCAL_NAME_RESOLVER (leitura do Portable PDB — ver pdb.rs) quando
+/// disponível; cai de volta pra "local_N" (índice posicional puro) quando
+/// não há resolver setado (icordebug-spike, o binário legado) ou quando o
+/// resolver não achou nome pro slot (sem .pdb encontrado, ou índice fora de
+/// qualquer LocalScope conhecido).
+pub unsafe fn extract_locals(il_frame: *mut c_void, method_token: u32, il_offset: u32) -> BTreeMap<String, serde_json::Value> {
+    let names = LOCAL_NAME_RESOLVER.map(|resolve| resolve(method_token, il_offset)).unwrap_or_default();
     let mut locals = BTreeMap::new();
     for i in 0..64u32 {
         let value = match get_local_variable(il_frame, i) {
             Ok(v) => v,
             Err(_) => break,
         };
-        locals.insert(format!("local_{i}"), local_value_to_json(value));
+        let key = names.get(&i).cloned().unwrap_or_else(|| format!("local_{i}"));
+        locals.insert(key, local_value_to_json(value));
     }
     locals
 }
@@ -981,15 +1008,27 @@ unsafe fn local_value_to_json(value: *mut c_void) -> serde_json::Value {
             Ok(Some(dereferenced)) => match query_interface(dereferenced, &IID_ICORDEBUG_ARRAY_VALUE) {
                 Ok(array_value) => match get_array_count(array_value) {
                     Ok(count) => {
+                        // Cap at MAX_ARRAY_ELEMENTS (see doc comment above),
+                        // same idea as Java's serializeValue: read only the
+                        // capped elements, then append a truncation marker
+                        // string (matching Java's "...(+N elementos)"
+                        // pattern) instead of silently dropping the rest.
+                        let cap = count.min(MAX_ARRAY_ELEMENTS);
                         let mut items = Vec::new();
-                        for i in 0..count {
+                        for i in 0..cap {
                             let v = match get_array_element_at(array_value, i) {
                                 Ok(elem) => get_value_i32(elem).unwrap_or(0),
                                 Err(_) => 0,
                             };
-                            items.push(v);
+                            items.push(serde_json::json!(v));
                         }
-                        serde_json::json!(items)
+                        if count > cap {
+                            items.push(serde_json::json!(format!(
+                                "...(+{} elementos)",
+                                count - cap
+                            )));
+                        }
+                        serde_json::Value::Array(items)
                     }
                     Err(_) => serde_json::Value::Null,
                 },

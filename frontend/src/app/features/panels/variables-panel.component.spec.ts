@@ -46,4 +46,12 @@ describe('VariablesPanelComponent', () => {
     const text = fixture.nativeElement.textContent.toLowerCase();
     expect(text).not.toMatch(/não são os nomes reais/);
   });
+
+  it('does not show the disclaimer for C# once PDB names are resolved', () => {
+    const fixture = create('csharp', step({ counter: 0, message: 'hello' }));
+    const text = fixture.nativeElement.textContent;
+    expect(text).toContain('counter');
+    expect(text).toContain('message');
+    expect(text.toLowerCase()).not.toMatch(/não são os nomes reais|posições/);
+  });
 });

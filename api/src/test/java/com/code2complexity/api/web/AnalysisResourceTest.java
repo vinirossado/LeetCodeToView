@@ -4,6 +4,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import com.code2complexity.api.ratelimit.RateLimiter;
 import com.code2complexity.api.support.FakeStaticAnalyzer;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -19,9 +20,16 @@ class AnalysisResourceTest {
     @Inject
     FakeStaticAnalyzer analyzer;
 
+    @Inject
+    RateLimiter rateLimiter;
+
     @BeforeEach
     void resetFake() {
         analyzer.reset();
+        // See ExecutionsResourceTest's identical reset for why: one
+        // singleton RateLimiter is shared across every @QuarkusTest in
+        // this run.
+        rateLimiter.reset();
     }
 
     @Nested
@@ -104,9 +112,14 @@ class AnalysisResourceTest {
         }
 
         @Test
-        @DisplayName("returns 500 with the error message when the analyzer fails unexpectedly")
+        @DisplayName("returns 500 with a sanitized generic error when the analyzer fails unexpectedly")
         void returns500OnUnexpectedError() {
-            analyzer.setError(new RuntimeException("static-analyzer exited with code 1"));
+            // Fase 2 hardening (see SandboxErrorSanitizer): the raw failure
+            // text isn't a compiler diagnostic here (static-analyzer is a
+            // parser, not a compiler), so it must NOT reach the client
+            // verbatim — only the generic message should.
+            analyzer.setError(new RuntimeException(
+                    "static-analyzer exited with code 1: thread 'main' panicked at src/main.rs:12:5"));
 
             given()
                     .contentType(ContentType.JSON)
@@ -114,7 +127,7 @@ class AnalysisResourceTest {
                     .when().post("/analysis")
                     .then()
                     .statusCode(500)
-                    .body("error", containsString("static-analyzer exited"));
+                    .body("error", containsString("internal sandbox error"));
         }
     }
 }

@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import com.code2complexity.api.ExecutionStore;
 import com.code2complexity.api.model.Execution;
 import com.code2complexity.api.model.ExecutionStatus;
+import com.code2complexity.api.ratelimit.RateLimiter;
 import com.code2complexity.api.support.FakeSandboxRunner;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,9 +36,18 @@ class ExecutionsResourceTest {
     @Inject
     FakeSandboxRunner runner;
 
+    @Inject
+    RateLimiter rateLimiter;
+
     @BeforeEach
     void resetFake() {
         runner.reset();
+        // Fase 2 hardening (RateLimitingFilter) shares one singleton
+        // RateLimiter across every @QuarkusTest in this run — reset it so
+        // this class's own request volume (unrelated to rate limiting,
+        // which RateLimitingFilterTest covers on its own) never trips the
+        // limit and starves a later test in the same class.
+        rateLimiter.reset();
     }
 
     private static Execution waitForTerminalStatus(ExecutionStore store, String id) {

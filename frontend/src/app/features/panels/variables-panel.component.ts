@@ -14,11 +14,13 @@ function formatValue(value: unknown): string {
 }
 
 /**
- * Renders `locals` for the currently viewed step. Handles the documented
- * Java/C# asymmetry (spec.md): Java resolves real variable names via JDI;
- * C# has no PDB parsing yet, so its keys are positional placeholders
- * ("local_0", "local_1", ...) — this panel shows them honestly, with a
- * visible disclaimer, rather than pretending they are real names.
+ * Renders `locals` for the currently viewed step. Java always resolves real
+ * variable names via JDI. C# resolves them from the Portable PDB emitted by
+ * `dotnet build` (see sandbox/src/pdb.rs); when a .pdb is missing or a slot
+ * falls outside every known scope, its key falls back to the positional
+ * placeholder ("local_0", "local_1", ...) it always used before PDB
+ * support existed — this panel shows that honestly, with a visible
+ * disclaimer, rather than pretending a fallback key is a real name.
  */
 @Component({
   selector: 'app-variables-panel',
@@ -38,4 +40,8 @@ export class VariablesPanelComponent {
       value: formatValue(value),
     }));
   });
+
+  readonly hasPositionalFallback = computed(
+    () => this.language() === 'csharp' && this.entries().some((entry) => /^local_\d+$/.test(entry.key)),
+  );
 }

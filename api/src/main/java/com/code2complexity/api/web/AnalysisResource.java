@@ -1,6 +1,7 @@
 package com.code2complexity.api.web;
 
 import com.code2complexity.api.analysis.StaticAnalyzer;
+import com.code2complexity.api.error.SandboxErrorSanitizer;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -43,7 +44,12 @@ public class AnalysisResource {
         } catch (StaticAnalyzer.UnsupportedLanguageException e) {
             return Response.status(501).entity(new ErrorResponse(e.getMessage())).build();
         } catch (Exception e) {
-            return Response.status(500).entity(new ErrorResponse(e.getMessage())).build();
+            // static-analyzer never produces a "compiler diagnostic" (it's
+            // a parser, not a compiler) — any failure here is internal, so
+            // this always sanitizes down to the generic message; see
+            // SandboxErrorSanitizer.
+            String sanitized = SandboxErrorSanitizer.sanitize(e.getMessage(), "static analysis", e);
+            return Response.status(500).entity(new ErrorResponse(sanitized)).build();
         }
     }
 }

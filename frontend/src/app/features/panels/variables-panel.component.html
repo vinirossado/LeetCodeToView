@@ -1,9 +1,9 @@
 <section class="panel">
   <h3>Variáveis locais</h3>
-  @if (language() === 'csharp') {
+  @if (hasPositionalFallback()) {
     <p class="disclaimer">
-      C# ainda não tem leitura de PDB: os nomes abaixo ("local_0", "local_1", ...) são posições,
-      não são os nomes reais das variáveis do código-fonte.
+      Sem informação de PDB para este ponto: os nomes com prefixo "local_" abaixo são posições,
+      não os nomes reais das variáveis do código-fonte.
     </p>
   }
   @if (entries().length === 0) {

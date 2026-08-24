@@ -87,6 +87,19 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         "--rlimit_nofile", "1024",
         "--use_cgroupv2",
         "--cgroup_mem_max", "536870912",
+        // Fase 2 hardening: memory.swap.max=0 for the jail's cgroup, so a
+        // memory-hungry target gets SIGKILLed by cgroup_mem_max immediately
+        // instead of swapping (which would thrash the HOST, not just the
+        // jail — swap is host-wide, not namespaced per cgroup). Confirmed
+        // by reading nsjail's own source (cgroup2.cc::initNsFromParentMem):
+        // --cgroup_mem_swap_max VALUE writes VALUE straight to the cgroup
+        // v2 `memory.swap.max` file (default is -1, meaning "don't write
+        // it at all" — NOT "swap allowed", so this flag is required, not
+        // redundant with cgroup_mem_max). See tasks.md "Fase 2" for the
+        // empirical verification (reading memory.swap.max from inside a
+        // running jail) and the same Docker Desktop/macOS cgroup-delegation
+        // caveat already documented for cgroup_mem_max.
+        "--cgroup_mem_swap_max", "0",
         "--cgroup_pids_max", "512",
         "--chroot", "/",
         "--cwd", src_dir.to_str().unwrap(),

@@ -27,6 +27,7 @@ use libloading::Library;
 
 use crate::com;
 use crate::events::{self, Event, RunOutcome};
+use crate::pdb::PortablePdb;
 
 pub const CSHARP_WORKER_FLAG: &str = "--csharp-worker";
 
@@ -56,6 +57,12 @@ type RegisterForRuntimeStartupFn =
 static mut CALLBACK_FIRED: bool = false;
 static mut CALLBACK_HR: HResult = 0;
 static mut P_CORDB: *mut c_void = ptr::null_mut();
+// Loaded once up front in run_worker (single dll/execution per process —
+// same lifetime assumption as com.rs's other statics), then read from
+// com::LOCAL_NAME_RESOLVER's plain-fn callback (no captured state allowed,
+// see the comment on LOCAL_NAME_RESOLVER in com.rs), hence a static instead
+// of a local variable threaded through.
+static mut PDB: Option<PortablePdb> = None;
 
 extern "C" fn startup_callback(p_cordb: *mut c_void, _parameter: *mut c_void, hr: HResult) {
     unsafe {
@@ -128,6 +135,10 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
         "--rlimit_nofile", "256",
         "--use_cgroupv2",
         "--cgroup_mem_max", "268435456",
+        // Fase 2 hardening: memory.swap.max=0 — same rationale/verification
+        // as java.rs's identical flag (see the comment there): forces an
+        // immediate cgroup OOM kill instead of swap thrashing the host.
+        "--cgroup_mem_swap_max", "0",
         "--cgroup_pids_max", "256",
         "--chroot", "/",
         "--cwd", cwd.to_str().unwrap(),
@@ -198,6 +209,20 @@ pub fn run_worker(dll_file: &Path) -> i32 {
         com::FATAL_ERROR = false;
         com::STEP_EVENTS_EMITTED = 0;
         com::STEP_CAPPED = false;
+
+        // PDB is optional: `dotnet build -c Debug` produces one right next
+        // to the dll (see ProcessSandboxRunner.compileCsharp on the API
+        // side), but if it's missing/unparseable for any reason,
+        // LOCAL_NAME_RESOLVER stays None and extract_locals falls back to
+        // the positional "local_N" naming that's always worked.
+        PDB = PortablePdb::load(dll_file);
+        com::LOCAL_NAME_RESOLVER = if (*std::ptr::addr_of!(PDB)).is_some() {
+            Some(|token, offset| {
+                (*std::ptr::addr_of!(PDB)).as_ref().map(|p| p.locals_for(token, offset)).unwrap_or_default()
+            })
+        } else {
+            None
+        };
     }
 
     let lib = match unsafe { Library::new(LIBDBGSHIM_PATH) } {

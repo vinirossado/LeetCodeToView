@@ -27,11 +27,39 @@ test('runs the Java starter example end to end: leaves "Executando…" and shows
   const executionId = page.locator('.execution-id');
   await expect(executionId).toContainText('execution_id:');
 
-  // The starter example prints 0..4 (see app.ts STARTER_CODE.java: a
-  // running total printed once per loop iteration, n = 5).
+  // The starter example prints a running total once per loop iteration
+  // (n = 5), so stdout is "0", "1", "3", "6", "10" on separate lines (see
+  // app.ts STARTER_CODE.java).
   await page.getByRole('tab', { name: 'Saída' }).click();
   const output = page.locator('pre');
   await expect(output).toContainText('0');
+});
+
+test('renders each stdout line on its own line instead of running them together', async ({ page }) => {
+  // Regression test: outputSoFar() (trace-store.service.ts) used to join
+  // stdout events with '' instead of '\n'. The API wraps sandbox-runner's
+  // stdout one line at a time via BufferedReader.readLine() (ExecutionJob.
+  // java), which strips the newline — so joining with '' silently glued
+  // every line back together with no separator at all, including nsjail's
+  // own startup diagnostics (JVM "[warning][os,container] Cgroup ..."
+  // lines) that happen to share the same stdout stream as the sandboxed
+  // program. The visible symptom was the Saída panel showing those warning
+  // lines concatenated back-to-back, followed by the program's real
+  // "0","1","3","6","10" output squashed into a single unreadable
+  // "013610".
+  await page.goto('/');
+
+  const runButton = page.getByRole('button', { name: /Run|Executando/ });
+  await runButton.click();
+  await expect(runButton).toHaveText('Run', { timeout: 20_000 });
+
+  await page.getByRole('tab', { name: 'Saída' }).click();
+  const outputText = await page.locator('pre').innerText();
+
+  expect(outputText).not.toContain('013610');
+  expect(outputText.split('\n').map((line) => line.trim())).toEqual(
+    expect.arrayContaining(['0', '1', '3', '6', '10']),
+  );
 });
 
 test('runs the C# starter example end to end and shows the known local_N/PDB disclaimer', async ({ page }) => {
@@ -47,6 +75,13 @@ test('runs the C# starter example end to end and shows the known local_N/PDB dis
   const runButton = page.getByRole('button', { name: /Run|Executando/ });
   await runButton.click();
   await expect(runButton).toHaveText('Run', { timeout: 20_000 });
+
+  // Following-live navigation lands the cursor at the trace's pseudo-end
+  // position after the run finishes, which can legitimately have no locals
+  // in scope (e.g. right after the loop's closing brace) — jump back to the
+  // very first step, which is inside the loop body and always has locals.
+  await page.getByTitle('Ir para o início').click();
+  await page.getByTitle('Próximo passo').click();
 
   await page.getByRole('tab', { name: 'Variáveis' }).click();
   // C# locals render as positional local_0/local_1/... placeholders, not
@@ -82,12 +117,14 @@ test('rejects Java code without a class named Main with a clear inline error, no
   // The Monaco editor's content is what gets submitted — select all and
   // replace with code missing the required `class Main` (see
   // ExecutionsResource's server-side validation, api/src/main/java/.../web/ExecutionsResource.java).
-  // `.inputarea` (not `.view-lines`) is Monaco's actual hidden textarea that
-  // receives keyboard focus — clicking the rendered lines alone left focus
-  // ambiguous and Ctrl+A/typing appended after the starter code instead of
-  // replacing it.
-  await page.locator('.inputarea').click();
-  await page.keyboard.press('ControlOrMeta+a');
+  // Found empirically: clicking the `.view-lines` *container* (rather than
+  // a specific `.view-line`) places the caret ambiguously (observed landing
+  // at the very end of the buffer), and Playwright's `ControlOrMeta+a`
+  // shorthand did not trigger Monaco's select-all in that state either —
+  // only clicking a specific line plus the platform-explicit shortcut
+  // reliably replaces the whole buffer.
+  await page.locator('.view-line').first().click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a');
   await page.keyboard.type('class Solution { void run() {} }');
 
   await page.getByRole('button', { name: 'Run' }).click();

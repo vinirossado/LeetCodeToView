@@ -1,5 +1,6 @@
 package com.code2complexity.api;
 
+import com.code2complexity.api.error.SandboxErrorSanitizer;
 import com.code2complexity.api.model.Execution;
 import com.code2complexity.api.model.ExecutionStatus;
 import com.code2complexity.api.sandbox.SandboxRunner;
@@ -41,9 +42,14 @@ public class ExecutionJob {
             runner.run(execution, line -> store.appendEvent(execution.getId(), parseEventOrStdout(line)));
             store.finish(execution.getId(), ExecutionStatus.COMPLETED);
         } catch (Exception e) {
+            // Never forward a raw exception message to the client as-is —
+            // it can come straight from sandbox-runner/dotnet/nsjail and
+            // leak host paths, panic locations, etc. See
+            // SandboxErrorSanitizer for what is/isn't safe to pass through.
+            String sanitized = SandboxErrorSanitizer.sanitize(e.getMessage(), "execution " + execution.getId(), e);
             ObjectNode errorEvent = MAPPER.createObjectNode();
             errorEvent.put("type", "error");
-            errorEvent.put("message", e.getMessage());
+            errorEvent.put("message", sanitized);
             store.appendEvent(execution.getId(), errorEvent);
             store.finish(execution.getId(), ExecutionStatus.FAILED);
         }

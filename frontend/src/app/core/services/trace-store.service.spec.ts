@@ -187,11 +187,15 @@ describe('TraceStoreService', () => {
 
   describe('output accumulated up to the cursor (respects chronological interleaving with steps)', () => {
     beforeEach(() => {
-      store.ingestEvent({ type: 'stdout', text: 'antes\n' });
+      // Each stdout event's `text` is one line with no trailing newline —
+      // the API strips it via BufferedReader.readLine() (ExecutionJob.java)
+      // before wrapping the line as a synthetic event. outputSoFar() is
+      // responsible for putting the newlines back when joining lines.
+      store.ingestEvent({ type: 'stdout', text: 'antes' });
       store.ingestEvent(step(1));
-      store.ingestEvent({ type: 'stdout', text: 'meio\n' });
+      store.ingestEvent({ type: 'stdout', text: 'meio' });
       store.ingestEvent(step(2));
-      store.ingestEvent({ type: 'stdout', text: 'depois\n' });
+      store.ingestEvent({ type: 'stdout', text: 'depois' });
       store.jumpToStart();
     });
 
@@ -201,12 +205,12 @@ describe('TraceStoreService', () => {
 
     it('shows only stdout that happened at or before the current step', () => {
       store.stepForward();
-      expect(store.outputSoFar()).toBe('antes\nmeio\n');
+      expect(store.outputSoFar()).toBe('antes\nmeio');
     });
 
     it('shows trailing stdout once fully replayed to the end', () => {
       store.jumpToEnd();
-      expect(store.outputSoFar()).toBe('antes\nmeio\ndepois\n');
+      expect(store.outputSoFar()).toBe('antes\nmeio\ndepois');
     });
   });
 
