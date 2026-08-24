@@ -13,8 +13,14 @@
 //! - `DataDependentExit` é uma heurística conservadora: qualquer `break`/`return`
 //!   dentro de um `if` aninhado em um loop é tratado como potencial saída antecipada
 //!   dependente de dado, mesmo quando um humano conseguiria provar que o pior caso
-//!   ainda é O(n) (busca linear) ou O(log n) (busca binária). Preferimos essa
-//!   imprecisão (falso "não determinado") a cravar um Big-O que pode estar errado.
+//!   ainda é O(n) (busca linear). Preferimos essa imprecisão (falso "não determinado")
+//!   a cravar um Big-O que pode estar errado. **Exceção deliberada e estreita**: o
+//!   idioma de busca binária (ver `LoopKind::LogarithmicNarrowing` e
+//!   `is_binary_search_idiom` nos adapters) é comum e reconhecível o bastante pra
+//!   valer a pena um caso especial — quando reconhecido, o `if`/`return` antecipado
+//!   dentro do loop NÃO vira `DataDependentExit` (ver adapters: o corpo desse loop é
+//!   construído com `in_loop=false`), já que terminar mais cedo não piora o limite de
+//!   O(log n) já provado pela estrutura de convergência dos dois limites.
 
 use serde::Serialize;
 
@@ -25,6 +31,16 @@ pub enum LoopKind {
     /// Variável de controle multiplicada/dividida por uma constante a cada iteração
     /// (i /= 2, i *= 2, i >>= 1, i = i / k, i = i * k).
     Logarithmic,
+    /// Mesmo comportamento assintótico de `Logarithmic`, mas detectado por um sinal
+    /// estrutural diferente: o idioma clássico de busca binária, onde DOIS limites
+    /// (ex: `left`/`right`) convergem um em direção ao outro por ~metade a cada
+    /// iteração via um ponto médio (`mid`) — não há uma única variável que se
+    /// divide/multiplica por si mesma (o padrão que `Logarithmic` cobre), então essa
+    /// classe de loop nunca batia em nenhuma das heurísticas de `classify_update_node`.
+    /// Mantido como variante própria só para a evidência mostrada ao usuário citar a
+    /// justificativa certa em vez do texto de `Logarithmic` ("divisão/multiplicação
+    /// por constante"), que não se aplica aqui.
+    LogarithmicNarrowing,
     /// Update presente, mas não reconhecido pelas heurísticas acima (ex: incremento
     /// não-constante, chamada de método no update, múltiplas variáveis).
     Unknown,

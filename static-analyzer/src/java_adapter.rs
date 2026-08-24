@@ -170,26 +170,48 @@ fn build_statement(node: Node, src: &[u8], method_name: &str, in_loop: bool) -> 
         "while_statement" => {
             let condition = node.child_by_field_name("condition");
             let body_node = node.child_by_field_name("body").unwrap();
-            let kind = condition
-                .and_then(|c| classify_loop_by_scanning_body(body_node, c, src))
-                .unwrap_or(LoopKind::Unknown);
+            let is_bsearch = condition
+                .map(|c| is_binary_search_idiom(body_node, c, src))
+                .unwrap_or(false);
+            let kind = if is_bsearch {
+                LoopKind::LogarithmicNarrowing
+            } else {
+                condition
+                    .and_then(|c| classify_loop_by_scanning_body(body_node, c, src))
+                    .unwrap_or(LoopKind::Unknown)
+            };
             ControlNode::Loop {
                 kind,
                 line,
-                body: build_body_as_vec(body_node, src, method_name, true),
+                // in_loop=false when the idiom is recognized: the early
+                // `return` inside `if (array[mid] == target)` would
+                // otherwise be flagged as DataDependentExit (see
+                // build_statement's "if_statement" arm below) — but once
+                // the two-bound-narrowing structure is proven, returning
+                // early only terminates SOONER, it can't make the loop run
+                // MORE than the already-proven O(log n) iterations. See
+                // ir.rs's doc comment on this exception.
+                body: build_body_as_vec(body_node, src, method_name, !is_bsearch),
             }
         }
 
         "do_statement" => {
             let condition = node.child_by_field_name("condition");
             let body_node = node.child_by_field_name("body").unwrap();
-            let kind = condition
-                .and_then(|c| classify_loop_by_scanning_body(body_node, c, src))
-                .unwrap_or(LoopKind::Unknown);
+            let is_bsearch = condition
+                .map(|c| is_binary_search_idiom(body_node, c, src))
+                .unwrap_or(false);
+            let kind = if is_bsearch {
+                LoopKind::LogarithmicNarrowing
+            } else {
+                condition
+                    .and_then(|c| classify_loop_by_scanning_body(body_node, c, src))
+                    .unwrap_or(LoopKind::Unknown)
+            };
             ControlNode::Loop {
                 kind,
                 line,
-                body: build_body_as_vec(body_node, src, method_name, true),
+                body: build_body_as_vec(body_node, src, method_name, !is_bsearch),
             }
         }
 
@@ -413,4 +435,180 @@ fn is_loop_boundary(kind: &str) -> bool {
         kind,
         "for_statement" | "while_statement" | "do_statement" | "enhanced_for_statement"
     )
+}
+
+/// Recognizes the classic binary-search narrowing idiom:
+///
+/// ```java
+/// while (left <= right) {
+///     int mid = left + (right - left) / 2;
+///     if (array[mid] == target) { return mid; }
+///     if (array[mid] < target) { left = mid + 1; } else { right = mid - 1; }
+/// }
+/// ```
+///
+/// This does NOT match `classify_update_node`'s `Logarithmic` case at all —
+/// that heuristic only looks for a single variable that divides/multiplies
+/// ITSELF each iteration (`i /= 2`); here neither `left` nor `right` is ever
+/// self-divided, the O(log n) bound instead comes from two DIFFERENT
+/// variables converging toward each other via a midpoint. That's a distinct
+/// structural signal, detected here instead:
+///
+/// 1. The condition must reference (textually/structurally) at least 2
+///    distinct identifiers — candidate "bounds" (e.g. `left`, `right`).
+/// 2. Somewhere at the top level of the loop body, an assignment/declaration
+///    (the "mid" candidate) whose right-hand side references at least 2 of
+///    those bound identifiers — the midpoint computation.
+/// 3. A top-level `if`/`else` whose two branches each assign a DIFFERENT one
+///    of the bound identifiers to an expression referencing the mid
+///    candidate (e.g. `left = mid + 1` / `right = mid - 1`).
+///
+/// Deliberately narrow: only variable NAMES and syntactic shape are
+/// checked, not actual midpoint correctness (e.g. `mid = left + right` — an
+/// overflow bug, but structurally identical to a valid midpoint — would
+/// still match; that's out of scope for a complexity analyzer). A false
+/// negative just falls back to the pre-existing "não foi possível
+/// determinar" behavior, same as before this existed.
+fn is_binary_search_idiom(body: Node, condition: Node, src: &[u8]) -> bool {
+    let mut bound_idents = Vec::new();
+    collect_identifier_names(condition, src, &mut bound_idents);
+    bound_idents.dedup();
+    if bound_idents.len() < 2 {
+        return false;
+    }
+
+    let statements: Vec<Node> = if body.kind() == "block" {
+        let mut cursor = body.walk();
+        body.named_children(&mut cursor).collect()
+    } else {
+        vec![body]
+    };
+
+    let mid_candidates: Vec<String> = statements
+        .iter()
+        .filter_map(|stmt| assignment_in_statement(*stmt, src))
+        .filter(|(_, rhs)| {
+            let mut rhs_idents = Vec::new();
+            collect_identifier_names(*rhs, src, &mut rhs_idents);
+            bound_idents.iter().filter(|b| rhs_idents.contains(b)).count() >= 2
+        })
+        .map(|(name, _)| name)
+        .collect();
+
+    if mid_candidates.is_empty() {
+        return false;
+    }
+
+    for stmt in &statements {
+        if stmt.kind() != "if_statement" {
+            continue;
+        }
+        let consequence = stmt.child_by_field_name("consequence");
+        let alternative = stmt.child_by_field_name("alternative");
+        let (Some(cons), Some(alt)) = (consequence, alternative) else {
+            continue;
+        };
+
+        let cons_update = find_mid_derived_bound_update(cons, &bound_idents, &mid_candidates, src);
+        let alt_update = find_mid_derived_bound_update(alt, &bound_idents, &mid_candidates, src);
+
+        if let (Some(a), Some(b)) = (cons_update, alt_update) {
+            if a != b {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Within one branch of the narrowing `if`/`else`, finds an assignment to a
+/// bound identifier whose right-hand side references one of the mid
+/// candidates (e.g. `left = mid + 1`). Recurses one level into a nested
+/// `if_statement` too, since some binary-search variants nest the
+/// three-way split (`<`, `==`, `>`) differently than the flat two-`if`
+/// shape `is_binary_search_idiom` was written against.
+fn find_mid_derived_bound_update(
+    branch: Node,
+    bound_idents: &[&str],
+    mid_candidates: &[String],
+    src: &[u8],
+) -> Option<String> {
+    let statements: Vec<Node> = if branch.kind() == "block" {
+        let mut cursor = branch.walk();
+        branch.named_children(&mut cursor).collect()
+    } else {
+        vec![branch]
+    };
+
+    for stmt in statements {
+        if let Some((lhs, rhs)) = assignment_in_statement(stmt, src) {
+            if bound_idents.contains(&lhs.as_str()) {
+                let mut rhs_idents = Vec::new();
+                collect_identifier_names(rhs, src, &mut rhs_idents);
+                if mid_candidates.iter().any(|m| rhs_idents.contains(&m.as_str())) {
+                    return Some(lhs);
+                }
+            }
+        }
+        if stmt.kind() == "if_statement" {
+            if let Some(inner) = stmt.child_by_field_name("consequence") {
+                if let Some(found) = find_mid_derived_bound_update(inner, bound_idents, mid_candidates, src) {
+                    return Some(found);
+                }
+            }
+            if let Some(inner) = stmt.child_by_field_name("alternative") {
+                if let Some(found) = find_mid_derived_bound_update(inner, bound_idents, mid_candidates, src) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extracts `(lhs_name, rhs_node)` from a statement that's either a plain
+/// assignment (`x = ...;`) or a local variable declaration with an
+/// initializer (`int x = ...;`) — the two shapes a binary-search bound
+/// update or midpoint computation typically takes in Java.
+fn assignment_in_statement<'a>(stmt: Node<'a>, src: &[u8]) -> Option<(String, Node<'a>)> {
+    match stmt.kind() {
+        "expression_statement" => {
+            let inner = stmt.named_child(0)?;
+            if inner.kind() != "assignment_expression" {
+                return None;
+            }
+            let left = inner.child_by_field_name("left")?.utf8_text(src).ok()?.to_string();
+            let right = inner.child_by_field_name("right")?;
+            Some((left, right))
+        }
+        "local_variable_declaration" => {
+            let mut cursor = stmt.walk();
+            for child in stmt.named_children(&mut cursor) {
+                if child.kind() == "variable_declarator" {
+                    let name = child.child_by_field_name("name").and_then(|n| n.utf8_text(src).ok());
+                    let value = child.child_by_field_name("value");
+                    if let (Some(name), Some(value)) = (name, value) {
+                        return Some((name.to_string(), value));
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Collects the text of every `identifier` node in the subtree.
+fn collect_identifier_names<'a>(node: Node, src: &'a [u8], out: &mut Vec<&'a str>) {
+    if node.kind() == "identifier" {
+        if let Ok(text) = node.utf8_text(src) {
+            out.push(text);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_identifier_names(child, src, out);
+    }
 }

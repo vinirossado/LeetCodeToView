@@ -244,26 +244,45 @@ fn build_statement(node: Node, src: &[u8], method_name: &str, in_loop: bool) -> 
         "while_statement" => {
             let condition = node.child_by_field_name("condition");
             let body_node = node.child_by_field_name("body").unwrap();
-            let kind = condition
-                .and_then(|c| classify_loop_by_scanning_body(body_node, c, src))
-                .unwrap_or(LoopKind::Unknown);
+            let is_bsearch = condition
+                .map(|c| is_binary_search_idiom(body_node, c, src))
+                .unwrap_or(false);
+            let kind = if is_bsearch {
+                LoopKind::LogarithmicNarrowing
+            } else {
+                condition
+                    .and_then(|c| classify_loop_by_scanning_body(body_node, c, src))
+                    .unwrap_or(LoopKind::Unknown)
+            };
             ControlNode::Loop {
                 kind,
                 line,
-                body: build_body_as_vec(body_node, src, method_name, true),
+                // See java_adapter.rs's identical comment: once the two-
+                // bound-narrowing idiom is recognized, an early return
+                // inside it can only terminate SOONER than the already-
+                // proven O(log n) bound, so it's not treated as a
+                // DataDependentExit (in_loop=false suppresses that).
+                body: build_body_as_vec(body_node, src, method_name, !is_bsearch),
             }
         }
 
         "do_statement" => {
             let condition = node.child_by_field_name("condition");
             let body_node = node.child_by_field_name("body").unwrap();
-            let kind = condition
-                .and_then(|c| classify_loop_by_scanning_body(body_node, c, src))
-                .unwrap_or(LoopKind::Unknown);
+            let is_bsearch = condition
+                .map(|c| is_binary_search_idiom(body_node, c, src))
+                .unwrap_or(false);
+            let kind = if is_bsearch {
+                LoopKind::LogarithmicNarrowing
+            } else {
+                condition
+                    .and_then(|c| classify_loop_by_scanning_body(body_node, c, src))
+                    .unwrap_or(LoopKind::Unknown)
+            };
             ControlNode::Loop {
                 kind,
                 line,
-                body: build_body_as_vec(body_node, src, method_name, true),
+                body: build_body_as_vec(body_node, src, method_name, !is_bsearch),
             }
         }
 
@@ -508,4 +527,168 @@ fn is_loop_boundary(kind: &str) -> bool {
         kind,
         "for_statement" | "while_statement" | "do_statement" | "foreach_statement"
     )
+}
+
+/// Mirrors java_adapter.rs's `is_binary_search_idiom` exactly in algorithm
+/// (see its doc comment for the full rationale) — only the grammar-specific
+/// helper below (`assignment_in_statement`) differs, for the same reason
+/// `classify_update_node` has its own C# copy: `tree-sitter-c-sharp`'s local
+/// declaration shape differs from Java's.
+fn is_binary_search_idiom(body: Node, condition: Node, src: &[u8]) -> bool {
+    let mut bound_idents = Vec::new();
+    collect_identifier_names(condition, src, &mut bound_idents);
+    bound_idents.dedup();
+    if bound_idents.len() < 2 {
+        return false;
+    }
+
+    let statements: Vec<Node> = if body.kind() == "block" {
+        let mut cursor = body.walk();
+        body.named_children(&mut cursor).collect()
+    } else {
+        vec![body]
+    };
+
+    let mid_candidates: Vec<String> = statements
+        .iter()
+        .filter_map(|stmt| assignment_in_statement(*stmt, src))
+        .filter(|(_, rhs)| {
+            let mut rhs_idents = Vec::new();
+            collect_identifier_names(*rhs, src, &mut rhs_idents);
+            bound_idents.iter().filter(|b| rhs_idents.contains(b)).count() >= 2
+        })
+        .map(|(name, _)| name)
+        .collect();
+
+    if mid_candidates.is_empty() {
+        return false;
+    }
+
+    for stmt in &statements {
+        if stmt.kind() != "if_statement" {
+            continue;
+        }
+        let consequence = stmt.child_by_field_name("consequence");
+        let alternative = stmt.child_by_field_name("alternative");
+        let (Some(cons), Some(alt)) = (consequence, alternative) else {
+            continue;
+        };
+
+        let cons_update = find_mid_derived_bound_update(cons, &bound_idents, &mid_candidates, src);
+        let alt_update = find_mid_derived_bound_update(alt, &bound_idents, &mid_candidates, src);
+
+        if let (Some(a), Some(b)) = (cons_update, alt_update) {
+            if a != b {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Mirrors java_adapter.rs's function of the same name exactly.
+fn find_mid_derived_bound_update(
+    branch: Node,
+    bound_idents: &[&str],
+    mid_candidates: &[String],
+    src: &[u8],
+) -> Option<String> {
+    let statements: Vec<Node> = if branch.kind() == "block" {
+        let mut cursor = branch.walk();
+        branch.named_children(&mut cursor).collect()
+    } else {
+        vec![branch]
+    };
+
+    for stmt in statements {
+        if let Some((lhs, rhs)) = assignment_in_statement(stmt, src) {
+            if bound_idents.contains(&lhs.as_str()) {
+                let mut rhs_idents = Vec::new();
+                collect_identifier_names(rhs, src, &mut rhs_idents);
+                if mid_candidates.iter().any(|m| rhs_idents.contains(&m.as_str())) {
+                    return Some(lhs);
+                }
+            }
+        }
+        if stmt.kind() == "if_statement" {
+            if let Some(inner) = stmt.child_by_field_name("consequence") {
+                if let Some(found) = find_mid_derived_bound_update(inner, bound_idents, mid_candidates, src) {
+                    return Some(found);
+                }
+            }
+            if let Some(inner) = stmt.child_by_field_name("alternative") {
+                if let Some(found) = find_mid_derived_bound_update(inner, bound_idents, mid_candidates, src) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extracts `(lhs_name, rhs_node)` from a statement that's either a plain
+/// assignment (`x = ...;`) or a local declaration with an initializer
+/// (`int x = ...;`). Unlike Java's `local_variable_declaration` (whose
+/// `variable_declarator` has an explicit `value` field), C#'s
+/// `variable_declarator` has no `value` field at all — confirmed via
+/// `tree-sitter-c-sharp`'s own `node-types.json`, not assumed from the
+/// grammar being "similar to Java". The initializer is just an unnamed
+/// `expression`-typed sibling child alongside the `name` identifier, so it's
+/// found by elimination (the one named child that isn't the name node).
+fn assignment_in_statement<'a>(stmt: Node<'a>, src: &[u8]) -> Option<(String, Node<'a>)> {
+    match stmt.kind() {
+        "expression_statement" => {
+            let inner = stmt.named_child(0)?;
+            if inner.kind() != "assignment_expression" {
+                return None;
+            }
+            let left = inner.child_by_field_name("left")?.utf8_text(src).ok()?.to_string();
+            let right = inner.child_by_field_name("right")?;
+            Some((left, right))
+        }
+        "local_declaration_statement" => {
+            let mut cursor = stmt.walk();
+            for decl_stmt in stmt.named_children(&mut cursor) {
+                if decl_stmt.kind() != "variable_declaration" {
+                    continue;
+                }
+                let mut inner_cursor = decl_stmt.walk();
+                for declarator in decl_stmt.named_children(&mut inner_cursor) {
+                    if declarator.kind() != "variable_declarator" {
+                        continue;
+                    }
+                    let Some(name_node) = declarator.child_by_field_name("name") else {
+                        continue;
+                    };
+                    let Ok(name) = name_node.utf8_text(src) else {
+                        continue;
+                    };
+                    let mut vd_cursor = declarator.walk();
+                    let value = declarator
+                        .named_children(&mut vd_cursor)
+                        .find(|c| c.id() != name_node.id());
+                    if let Some(value) = value {
+                        return Some((name.to_string(), value));
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Collects the text of every `identifier` node in the subtree.
+fn collect_identifier_names<'a>(node: Node, src: &'a [u8], out: &mut Vec<&'a str>) {
+    if node.kind() == "identifier" {
+        if let Ok(text) = node.utf8_text(src) {
+            out.push(text);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_identifier_names(child, src, out);
+    }
 }

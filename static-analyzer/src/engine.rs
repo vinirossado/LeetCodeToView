@@ -205,6 +205,12 @@ fn classify_node(node: &ControlNode, evidence: &mut Vec<String>) -> Shape {
                     ));
                     compose_log(inner, *line)
                 }
+                LoopKind::LogarithmicNarrowing => {
+                    evidence.push(format!(
+                        "linha {line}: padrão de busca binária reconhecido (dois limites convergindo pela metade a cada iteração via ponto médio)"
+                    ));
+                    compose_log(inner, *line)
+                }
             }
         }
     }

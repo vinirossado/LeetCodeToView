@@ -67,3 +67,44 @@ fn java_snippets_produce_valid_json() {
 fn csharp_snippets_produce_valid_json() {
     run_on_all_snippets_in("test-snippets-csharp");
 }
+
+/// Unlike the smoke tests above (deliberately loose, don't pin exact Big-O),
+/// this DOES assert an exact classification — binary search is common and
+/// specific enough a regression here (e.g. someone tightening
+/// `is_binary_search_idiom` and accidentally narrowing it too far) would be
+/// a real, user-visible regression worth catching directly, not just
+/// "still produces valid JSON". See engine.rs's `LoopKind::LogarithmicNarrowing`
+/// and the `is_binary_search_idiom` function in both adapters.
+fn assert_method_is_logarithmic(dir: &str, file: &str, method_name: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir).join(file);
+    let output = Command::new(env!("CARGO_BIN_EXE_static-analyzer"))
+        .arg(&path)
+        .arg("--json")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn static-analyzer for {path:?}: {e}"));
+
+    let stdout = String::from_utf8(output.stdout).expect("non-utf8 stdout");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout for {path:?} was not valid JSON: {e}\n{stdout}"));
+
+    let methods = parsed.as_array().expect("expected top-level JSON array");
+    let method = methods
+        .iter()
+        .find(|m| m["method_name"] == method_name)
+        .unwrap_or_else(|| panic!("method '{method_name}' not found in output: {parsed}"));
+
+    assert_eq!(
+        method["time"], "Logarithmic",
+        "expected {method_name} in {file} to be classified O(log n) (JSON: \"Logarithmic\"), got: {method}"
+    );
+}
+
+#[test]
+fn java_binary_search_is_classified_logarithmic() {
+    assert_method_is_logarithmic("test-snippets", "BinarySearch.java", "binarySearch");
+}
+
+#[test]
+fn csharp_binary_search_is_classified_logarithmic() {
+    assert_method_is_logarithmic("test-snippets-csharp", "BinarySearch.cs", "Search");
+}
