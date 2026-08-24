@@ -85,9 +85,14 @@ class AnalysisResourceTest {
         }
 
         @Test
-        @DisplayName("returns 501 when the analyzer has no adapter for the language (e.g. C#)")
+        @DisplayName("returns 501 when the analyzer has no adapter for the language")
         void returns501ForUnsupportedLanguage() {
-            analyzer.setError(new com.code2complexity.api.analysis.StaticAnalyzer.UnsupportedLanguageException("csharp"));
+            // csharp now has a real adapter (static-analyzer/src/csharp_adapter.rs),
+            // so this exercises the mechanism generically rather than pinning
+            // it to a language that would go stale the moment support lands —
+            // ProcessStaticAnalyzer's own real language check is covered
+            // separately in ProcessStaticAnalyzerTest.
+            analyzer.setError(new com.code2complexity.api.analysis.StaticAnalyzer.UnsupportedLanguageException("ruby"));
 
             given()
                     .contentType(ContentType.JSON)
@@ -95,7 +100,7 @@ class AnalysisResourceTest {
                     .when().post("/analysis")
                     .then()
                     .statusCode(501)
-                    .body("error", containsString("csharp"));
+                    .body("error", containsString("ruby"));
         }
 
         @Test

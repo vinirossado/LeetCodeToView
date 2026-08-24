@@ -9,6 +9,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.UUID;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
@@ -25,6 +26,10 @@ public class ProcessStaticAnalyzer implements StaticAnalyzer {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    // static-analyzer's CLI picks the adapter from the file extension (see
+    // static-analyzer/src/main.rs) — not from a separate flag.
+    private static final Map<String, String> EXTENSIONS = Map.of("java", "java", "csharp", "cs");
+
     // Same /var/tmp reasoning as ProcessSandboxRunner: harmless here since
     // static-analyzer never runs inside nsjail, but kept consistent so
     // this class doesn't become the one place that silently breaks if a
@@ -36,14 +41,15 @@ public class ProcessStaticAnalyzer implements StaticAnalyzer {
 
     @Override
     public JsonNode analyze(String language, String code) throws IOException, InterruptedException {
-        if (!"java".equals(language)) {
+        String extension = EXTENSIONS.get(language);
+        if (extension == null) {
             throw new UnsupportedLanguageException(language);
         }
 
         Files.createDirectories(WORK_DIR_ROOT);
         Path workDir = Files.createTempDirectory(WORK_DIR_ROOT, "code2complexity-analysis-" + UUID.randomUUID());
         try {
-            Path sourcePath = workDir.resolve("Main.java");
+            Path sourcePath = workDir.resolve("Main." + extension);
             Files.writeString(sourcePath, code, StandardCharsets.UTF_8);
 
             Process process = new ProcessBuilder(binaryPath, sourcePath.toString(), "--json")
