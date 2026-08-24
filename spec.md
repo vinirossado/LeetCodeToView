@@ -8,7 +8,7 @@
               código + linguagem
                         │
                         ▼
-                  API / Crystal
+                 API / Quarkus
                         │
               ┌─────────┴─────────┐
               │                   │
@@ -33,7 +33,7 @@
 | Componente | Tecnologia |
 |---|---|
 | Frontend | TypeScript + Angular |
-| API | Crystal |
+| API | Java + Quarkus |
 | Sandbox Controller | Rust |
 | Primeiro runtime | Java + C# (juntos) |
 | Parsing | Tree-sitter |

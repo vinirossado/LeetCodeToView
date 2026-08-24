@@ -1,8 +1,13 @@
 // Runtime Java (JDI) — evolução direta do spike da Fase 0.5. O processo
 // nsjail lançado aqui roda jdi/Debugger.java, que já emite JSON de evento
-// diretamente no stdout (herdado, não passa pelo módulo `events` — ver
-// TODO abaixo sobre alinhar o schema hand-rolled do Debugger.java com
-// events::Event::Step, incluindo time_ns/memory_bytes que ainda faltam lá).
+// diretamente no stdout (herdado, não passa pelo módulo `events` — é um
+// processo Java separado, não tem como chamar o enum Rust `events::Event`).
+// O schema hand-rolled já bate campo a campo com `events::Event::Step`
+// (line/locals/stack/time_ns/memory_bytes) e já aplica o mesmo cap de 5.000
+// eventos (`events::STEP_EVENT_CAP`) emitindo `step_limit_exceeded` ao
+// atingir — ver jdi/Debugger.java. `memory_bytes` fica sempre `null`: não
+// há hoje um jeito de ler o heap do processo alvo (lançado à parte via
+// `LaunchingConnector`) sem JMX-over-JDWP, não implementado.
 
 use std::env;
 use std::path::Path;

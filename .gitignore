@@ -17,3 +17,5 @@ dist/
 
 # Logs/artefatos de depuração locais
 *.log
+
+.quarkus

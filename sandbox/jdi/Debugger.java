@@ -41,6 +41,15 @@ public class Debugger {
         long t0 = System.nanoTime();
         final int[] eventCount = {0};
         final int[] emittedCount = {0};
+        // Post-spike scope decision (Fase 0.5, see spec.md "Throttling de
+        // eventos"): 5,000 step events per execution, same cap as the C#
+        // side (events::STEP_EVENT_CAP in sandbox/src/events.rs). Once hit,
+        // disables the StepRequest and lets the program finish on its own
+        // (or hit the external timeout) with no instrumentation overhead —
+        // this is a hard cap, not sampling.
+        final int STEP_EVENT_CAP = 5000;
+        final StepRequest[] activeStepReq = {null};
+        final boolean[] capped = {false};
 
         LaunchingConnector connector = Bootstrap.virtualMachineManager().defaultConnector();
         Map<String, Connector.Argument> arguments = connector.defaultArguments();
@@ -84,16 +93,33 @@ public class Debugger {
                     stepReq.addClassExclusionFilter("sun.*");
                     stepReq.setSuspendPolicy(suspendPolicy);
                     stepReq.enable();
+                    activeStepReq[0] = stepReq;
                     eventCount[0]++;
                     if (!skipData && eventCount[0] % sampleN == 0) {
-                        emitStepEvent((LocatableEvent) event);
+                        emitStepEvent((LocatableEvent) event, t0);
                         emittedCount[0]++;
+                        if (emittedCount[0] >= STEP_EVENT_CAP) {
+                            capped[0] = true;
+                            stepReq.disable();
+                            System.out.println("{\"type\":\"step_limit_exceeded\"}");
+                        }
                     }
                 } else if (event instanceof StepEvent) {
+                    if (capped[0]) {
+                        // A JDWP request may already have an event in
+                        // flight at the moment we disabled it — drop it
+                        // instead of emitting/counting past the cap.
+                        continue;
+                    }
                     eventCount[0]++;
                     if (!skipData && eventCount[0] % sampleN == 0) {
-                        emitStepEvent((StepEvent) event);
+                        emitStepEvent((StepEvent) event, t0);
                         emittedCount[0]++;
+                        if (emittedCount[0] >= STEP_EVENT_CAP) {
+                            capped[0] = true;
+                            activeStepReq[0].disable();
+                            System.out.println("{\"type\":\"step_limit_exceeded\"}");
+                        }
                     }
                 } else if (event instanceof VMDeathEvent || event instanceof VMDisconnectEvent) {
                     running = false;
@@ -112,7 +138,7 @@ public class Debugger {
                 emittedCount[0] * 1000.0 / Math.max(elapsedMs, 1)));
     }
 
-    static void emitStepEvent(LocatableEvent event) {
+    static void emitStepEvent(LocatableEvent event, long t0) {
         try {
             ThreadReference thread = event.thread();
             StackFrame frame = thread.frame(0);
@@ -141,9 +167,14 @@ public class Debugger {
             }
             stack.append(']');
 
+            // memory_bytes stays null: Runtime.getRuntime() here would
+            // measure the debugger's OWN JVM (this process), not the
+            // launched target's — that would be actively misleading, not
+            // just noisy, so it's omitted until there's a real way to read
+            // the debuggee's heap (JMX-over-JDWP against the target).
             System.out.println(String.format(
-                    "{\"type\":\"step\",\"line\":%d,\"locals\":%s,\"stack\":%s}",
-                    loc.lineNumber(), locals, stack));
+                    "{\"type\":\"step\",\"line\":%d,\"locals\":%s,\"stack\":%s,\"time_ns\":%d,\"memory_bytes\":null}",
+                    loc.lineNumber(), locals, stack, System.nanoTime() - t0));
         } catch (Exception e) {
             System.err.println("{\"type\":\"error\",\"message\":\"" + escapeJson(String.valueOf(e)) + "\"}");
         }
