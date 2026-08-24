@@ -155,4 +155,79 @@ describe('App', () => {
     expect(fixture.componentInstance.executionId()).toBe('exec-old');
     expect(fixture.componentInstance.totalSteps()).toBe(2);
   });
+
+  describe('panel tabs', () => {
+    it('defaults to the Variables tab (the one most referenced while stepping)', () => {
+      const fixture = create();
+      expect(fixture.componentInstance.activeTab()).toBe('variables');
+    });
+
+    it('switches the active tab on selection', () => {
+      const fixture = create();
+      fixture.componentInstance.onTabSelect('timeline');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.activeTab()).toBe('timeline');
+    });
+  });
+
+  describe('resizable split', () => {
+    function mockLayoutRect(fixture: ReturnType<typeof create>) {
+      const layoutEl = fixture.nativeElement.querySelector('.layout') as HTMLElement;
+      vi.spyOn(layoutEl, 'getBoundingClientRect').mockReturnValue({
+        left: 0,
+        width: 1000,
+        top: 0,
+        height: 0,
+        right: 1000,
+        bottom: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      } as DOMRect);
+      return layoutEl;
+    }
+
+    it('defaults the split ratio when nothing was persisted', () => {
+      const fixture = create();
+      expect(fixture.componentInstance.splitRatio()).toBeCloseTo(0.62);
+    });
+
+    it('restores a previously persisted split ratio', () => {
+      localStorage.setItem('code2complexity.splitRatio', '0.4');
+      const fixture = create();
+      expect(fixture.componentInstance.splitRatio()).toBeCloseTo(0.4);
+    });
+
+    it('ignores an out-of-range persisted split ratio and falls back to the default', () => {
+      localStorage.setItem('code2complexity.splitRatio', '0.95');
+      const fixture = create();
+      expect(fixture.componentInstance.splitRatio()).toBeCloseTo(0.62);
+    });
+
+    it('clamps the ratio while dragging so neither side can be dragged to zero', () => {
+      const fixture = create();
+      mockLayoutRect(fixture);
+
+      fixture.componentInstance.onResizerPointerDown({ preventDefault: () => {}, clientX: 620 } as PointerEvent);
+
+      document.dispatchEvent(new MouseEvent('pointermove', { clientX: -5000 }));
+      expect(fixture.componentInstance.splitRatio()).toBeCloseTo(0.3);
+
+      document.dispatchEvent(new MouseEvent('pointermove', { clientX: 5000 }));
+      expect(fixture.componentInstance.splitRatio()).toBeCloseTo(0.75);
+
+      document.dispatchEvent(new MouseEvent('pointerup'));
+    });
+
+    it('persists the split ratio to localStorage once the drag ends', () => {
+      const fixture = create();
+      mockLayoutRect(fixture);
+
+      fixture.componentInstance.onResizerPointerDown({ preventDefault: () => {}, clientX: 620 } as PointerEvent);
+      document.dispatchEvent(new MouseEvent('pointermove', { clientX: 450 }));
+      document.dispatchEvent(new MouseEvent('pointerup'));
+
+      expect(localStorage.getItem('code2complexity.splitRatio')).toBe(String(fixture.componentInstance.splitRatio()));
+    });
+  });
 });

@@ -92,6 +92,9 @@ export class CodeEditorComponent implements AfterViewInit, OnDestroy {
       minimap: { enabled: false },
       readOnly: this.readOnly(),
       glyphMargin: true,
+      // Match the app's dark theme instead of leaving Monaco on its light
+      // default — the redesign moved the whole surrounding UI to dark.
+      theme: 'vs-dark',
     });
 
     this.editorInstance.onDidChangeModelContent(() => {

@@ -96,6 +96,19 @@ describe('ExecutionSessionService', () => {
 
       expect(trace.status()).toBe('failed');
     });
+
+    it('marks status failed instead of leaving it stuck when the socket drops AND the GET /trace fallback also fails', () => {
+      // Regression test for the same "never leave status on pending/running
+      // forever" concern as load()'s error handler below — this fallback
+      // fetch (triggered when the WebSocket itself errors mid-run) can
+      // itself fail, e.g. if the API becomes unreachable entirely.
+      session.run('java', 'int x = 1;');
+      createExecution$.next({ execution_id: 'exec-42' });
+      wsEvents$.error(new Error('socket dropped'));
+      getTrace$.error(new HttpErrorResponse({ status: 0, error: null, statusText: 'Unknown Error' }));
+
+      expect(trace.status()).toBe('failed');
+    });
   });
 
   describe('load() — REST fallback for page reload / reconnect (spec.md "Reconexão")', () => {
@@ -129,6 +142,22 @@ describe('ExecutionSessionService', () => {
 
       wsEvents$.next(step(2));
       expect(trace.totalSteps()).toBe(2);
+    });
+
+    it('marks status failed instead of leaving it stuck on pending when GET /trace fails', () => {
+      // Regression test: a stale execution_id from a previous localStorage
+      // session (see app.ts's constructor, which auto-calls load() with
+      // whatever id was last saved) can point at an execution that no
+      // longer exists once the API's in-memory ExecutionStore has been
+      // reset (e.g. the container was recreated). `reset()` sets status to
+      // 'pending'; without an error handler updating it, `isBusy` (and the
+      // "Executando…" button) would stay stuck forever even though no run
+      // was ever attempted this time around.
+      session.load('exec-gone');
+      getTrace$.error(new HttpErrorResponse({ status: 404, error: { error: 'execution not found' } }));
+
+      expect(trace.status()).toBe('failed');
+      expect(session.runError()).toBe('execution not found');
     });
   });
 });

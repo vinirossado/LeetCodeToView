@@ -211,9 +211,10 @@ Mesma estratégia do Sandbox Runner: provar o desenho numa linguagem antes de re
 > camada de decorations do zero; não valia a troca para o escopo do MVP.
 
 Desenvolvido BDD-first (specs Vitest — `describe`/`it`, escritas junto com cada peça, não depois),
-mesma disciplina do resto do monorepo. **99 exemplos, 0 falhas** (`npx ng test --watch=false`,
-15 arquivos de spec). `npx ng build` gera um bundle de produção válido (3.62 MB inicial,
-dentro do budget configurado em `angular.json`; a maior parte é o próprio Monaco).
+mesma disciplina do resto do monorepo. **107 exemplos, 0 falhas** (`npx ng test --watch=false`,
+15 arquivos de spec — 100 originais + 7 novos do redesign visual descrito abaixo).
+`npx ng build` gera um bundle de produção válido (3.77 MB inicial, dentro do budget configurado
+em `angular.json`; a maior parte é o próprio Monaco).
 
 - [x] Estrutura inicial do projeto (Angular CLI, standalone components) — `ng new frontend` via
   Angular CLI 22.1.5 (`frontend/`), standalone por padrão (sem NgModules), zoneless (sem
@@ -300,6 +301,8 @@ dentro do budget configurado em `angular.json`; a maior parte é o próprio Mona
 **Em aberto / não feito nesta tarefa:**
 - [x] **Integração ao vivo contra a API/sandbox reais — validada depois, via `docker-compose.yml`.** O item abaixo descrevia isso como pendente no momento em que o frontend foi construído (contra fakes/mocks apenas); validado de verdade numa sessão posterior, rodando a stack inteira (`docker compose up`) e batendo em cada rota real através do proxy nginx do frontend (`localhost:4200`, não direto na API): `POST /executions` (Java e C# reais, sandbox de verdade), `GET /executions/:id/trace`, `GET /executions/:id/events` via WebSocket (upgrade real através do proxy, replay + stream + fechamento no fim da execução, e o caminho de erro pra id desconhecido — testado com um cliente WS mínimo escrito à mão em Node, já que não havia navegador conectado disponível), e `POST /analysis`. Contrato bateu exatamente com o que `ExecutionApiService`/`ExecutionSocketService`/`ComplexityApiService` já esperavam — nenhuma mudança de contrato foi necessária do lado do frontend.
 - [x] **Achado grave, só visível rodando no navegador de verdade (não pego por nenhum teste automatizado, nem pela verificação via curl acima): o CSS do próprio Monaco nunca era incluído no bundle de produção.** Sintoma reportado pelo usuário com screenshot: editor renderizando as linhas do código fora de ordem/embaralhadas (efeito visual de "arquivo de trás pra frente"), botão "Executando…" preso. Causa raiz: `monaco-editor` era importado só via `import * as monaco from 'monaco-editor'` (ESM) — o pacote importa ~100 arquivos `.css` como efeito colateral espalhados fundo no próprio grafo de módulos, mas o pipeline esbuild do Angular não estava coletando esses imports; o bundle de CSS final ficava com **0 bytes**, zero regras `.monaco-editor` (confirmado inspecionando o bundle servido de verdade, não suposto) — sem a regra `position:absolute`/`top` que o Monaco depende pra posicionar cada `.view-line`, as linhas caem no fluxo padrão do navegador e a ordem visual fica ligada à ordem de reciclagem de DOM da virtualização do Monaco, não à ordem lógica do texto. Tentei primeiro um import de efeito colateral direto no componente (`import 'monaco-editor/min/vs/editor/editor.main.css'`) — falhou no build (`TS2882: Cannot find module ... for side-effect import`, TypeScript exige declaração de tipo pra imports de CSS que o pipeline do Angular só resolve fora do TS). Corrigido de verdade adicionando o CSS ao array `"styles"` do `angular.json` (nível de config de build, não passa pelo compilador TS): `"node_modules/monaco-editor/min/vs/editor/editor.main.css"` antes de `"src/styles.css"`. **Validado com evidência real**: bundle de CSS reconstruído foi de 0 bytes pra 131KB, com 644 ocorrências de `monaco-editor` e regras `position:absolute` reais (`.monaco-editor .lines-content>.view-lines>.view-line>span{...position:absolute;top:0}`) confirmadas por inspeção direta do arquivo servido pelo container reconstruído; suíte de testes (99 exemplos) continua verde — Monaco é mockado no jsdom nos testes, por isso esse bug nunca teria sido pego por eles, só é visível num navegador real
+- [x] **Segundo achado grave, reportado pelo usuário logo depois de corrigir o CSS do Monaco: a UI ficava presa em "Executando…" pra sempre, mesmo com o backend terminando normalmente** (confirmado via cliente WebSocket bruto em Node, direto contra o proxy nginx — servidor fecha a conexão corretamente ao terminar). Causa raiz, achada por revisão de código (sem navegador conectado disponível pra debugar ao vivo): `ExecutionSocketService` montava a URL do WebSocket como `${wsBaseUrl}/executions/:id/events`, e `environment.wsBaseUrl` é `''` em produção de propósito (deploy same-origin, ver `environment.ts`) — resultando numa URL relativa (`/executions/xyz/events`). **`new WebSocket(url)`, ao contrário de `fetch`/`<a href>`, não resolve URL relativa contra a página** (diferença real e documentada do spec — o construtor não recebe base URL nenhuma na resolução), e lança `SyntaxError` síncrono. Esse throw síncrono dentro do subscriber da `Observable` vira `subscriber.error()` automaticamente (comportamento padrão do RxJS), o que em `ExecutionSessionService.streamLive()` aciona o fallback de `GET /trace` — só que esse fallback é *busca única, sem polling/retry* — disparado quase instantaneamente após o `POST /executions` (a execução mal começou, ainda `pending`), e nada mais existe pra atualizar o status depois disso. Corrigido: `ExecutionSocketService` agora monta a URL absoluta (`ws://`/`wss://` + `location.host`) a partir de `location` sempre que `wsBaseUrl` estiver vazio, em vez de entregar ao navegador uma string relativa. **Achado revelador sobre a suíte de testes**: o teste `execution-socket.service.spec.ts` já existente afirmava explicitamente `expect(sockets[0].url).toBe(`${environment.wsBaseUrl}/executions/exec-1/events`)` — ou seja, **testava e confirmava o comportamento quebrado**, porque o `FakeSocket` usado nos testes não reproduz a validação de URL do construtor real do `WebSocket` (só o `new WebSocket()` de verdade do navegador lança nessa situação). Corrigido o teste pra checar URL absoluta (`ws://`/`wss://` + termina no path certo) e adicionado um teste de regressão dedicado, documentando explicitamente essa lacuna do mock pra não repetir o erro. Suíte: **100 exemplos, 0 falhas** (era 99). Validado que o fix está de verdade no bundle compilado servido pelo container (`grep` por `location.protocol`/`location.host` no `main-*.js` final)
+- [x] **Terceiro achado grave, reportado pelo usuário logo após o redesenho visual (LeetCode-style): "Executando…" continuava preso, mesmo já com o fix da URL do WebSocket no ar.** Causa raiz diferente da anterior: `App`'s constructor chama `session.load(lastId)` automaticamente no boot da página sempre que existe um `execution_id` salvo no `localStorage` (spec.md "Reconexão"). Como `ExecutionStore` da API é só em memória (`HashMap` do Quarkus), **qualquer recriação do container `api`** (que aconteceu várias vezes nesta sessão, a cada rebuild) apaga todas as execuções anteriores — então um `execution_id` antigo salvo no navegador de uma sessão de teste anterior passa a apontar pra um id que não existe mais (`GET /trace` → `404`). `ExecutionSessionService.load()`'s `error` handler só gravava a mensagem de erro (`runErrorSig.set(...)`) mas **nunca atualizava o status** — que `reset()` (chamado logo antes) já tinha deixado em `'pending'` — então `isBusy` (`status === 'pending' || 'running'`) ficava `true` pra sempre, travando o botão "Executando…" **mesmo sem o usuário ter clicado em nada**, só por abrir a página. Achado por revisão de código, não por debug ao vivo (extensão do Chrome pra visual check só conectou depois deste fix já estar pronto). Corrigido em dois pontos simétricos de `ExecutionSessionService`: (1) `load()`'s error handler agora chama `traceStore.setStatus('failed')` antes de gravar a mensagem; (2) o mesmo padrão existia sem proteção no fallback de `GET /trace` dentro de `streamLive()` (disparado quando o WebSocket cai no meio de uma execução) — se esse fallback também falhasse, o mesmo travamento aconteceria; adicionado handler de erro simétrico ali também. **2 testes de regressão novos** em `execution-session.service.spec.ts` cobrindo os dois pontos (`load()` com `GET /trace` retornando 404, e WebSocket caindo + fallback também falhando). Suíte: **109 exemplos, 0 falhas** (era 107, depois do redesenho). Validado com `curl` contra o container reconstruído que `GET /executions/id-inexistente/trace` retorna `404 {"error":"execution not found"}` de verdade, o gatilho exato do bug
 - [ ] Worker do Monaco (`MonacoEnvironment.getWorker`) não configurado — só é necessário pra
   language *services* (autocomplete/diagnostics; Java/C# aqui usam só highlight via gramática
   Monarch, que roda sem worker). Uma tentativa de configurar via `new Worker(new URL(...))` não
@@ -310,6 +313,54 @@ dentro do budget configurado em `angular.json`; a maior parte é o próprio Mona
   jump to start-end) foi pedida nos deliverables e é o que existe; um "play" cronometrado ficaria
   fácil de adicionar em cima de `TraceStoreService.stepForward()` mais tarde, se vira feature
   pedida
+- [x] **Redesign visual "estilo LeetCode"** — pedido explícito do usuário depois de ver a UI
+  ("o front ta totalmente bugado" → depois de corrigidos os dois bugs funcionais reais acima,
+  "ele deveria ter um visual parecido com LeetCode"). Quatro pedidos, todos implementados:
+  - **Tema escuro real** — `src/styles.css` ganhou um sistema de design tokens em `:root`
+    (superfícies `--c2c-bg`/`--c2c-bg-elevated`/`--c2c-bg-panel`/`--c2c-bg-inset`, texto
+    `--c2c-text`/`--c2c-text-secondary`/`--c2c-text-muted`, acento laranja estilo LeetCode
+    `--c2c-accent` (`#ffa116`), cores semânticas `--c2c-success`/`--c2c-warning`/`--c2c-error`
+    com variantes `-bg`, espaçamento `--c2c-space-1..5`, raio `--c2c-radius`/`--c2c-radius-sm`).
+    Os dois usos pré-existentes de `var(--c2c-*, <fallback>)` (`status-banner`, `output-panel`,
+    `complexity-panel`, `timeline-chart`) agora resolvem para tokens reais definidos — os
+    fallbacks ficam como default defensivo, não mais o valor efetivo. Monaco também migrado pro
+    tema escuro nativo (`theme: 'vs-dark'` em `code-editor.component.ts`,
+    `monaco.editor.create`) — antes ficava claro mesmo com o resto do app escuro
+  - **Split resizável (arrastável)** — sem lib de resize instalada (`package.json` conferido);
+    implementado com pointer events puros direto em `App` (`app.ts`:
+    `onResizerPointerDown`/`splitRatio` signal), sem depender de zona/NgZone (app é zoneless — o
+    `signal.set()` dentro dos listeners de `document` já agenda change detection sozinho).
+    Proporção clampada entre 30%–75% (`MIN_SPLIT_RATIO`/`MAX_SPLIT_RATIO`) pra nenhum lado poder
+    ser arrastado a zero, e persistida em `localStorage`
+    (`code2complexity.splitRatio`) seguindo o mesmo padrão já usado pro
+    `code2complexity.lastExecutionId` em `App`
+  - **Painéis viraram abas** — Variáveis/Call Stack/Saída/Complexidade/Timeline (as 5) ficam atrás
+    de um `role="tablist"` em `app.html`, um de cada vez (`activeTab` signal, `@switch` no
+    template), no lugar da coluna empilhada de antes. Decisão consciente de tabar também a
+    Complexidade (cogitada como "sempre visível", já que é resultado estático de um único disparo,
+    não algo que muda por passo) — mantida junto das outras porque nada se perde ao trocar de aba
+    e voltar (ela é só mais um signal), e documentado o porquê direto no código
+    (`app.ts`, comentário acima de `PANEL_TABS`). Aba default: Variáveis (a mais consultada durante
+    o step-through, mesmo raciocínio do LeetCode defaultar pra Testcase). O aviso de C# em
+    `app.html` (offset IL / `local_N`) e o status banner de evento terminal continuam **fora** das
+    abas, sempre visíveis, exatamente como pedido — não dependem de qual aba está ativa
+  - **Densidade/hierarquia visual** — toolbar única no topo (idioma + Run + execution_id, saiu de
+    dentro da coluna do editor pra virar um header de produto de verdade), espaçamento e
+    tipografia consistentes via os tokens acima em todo componente sob `features/panels/` e
+    `features/controls/`, cantos arredondados/bordas coerentes, e as decorations do Monaco que
+    antes não tinham *nenhum* CSS (`current-line-highlight`/`current-line-glyph`/
+    `breakpoint-glyph` — aplicadas via `deltaDecorations`, mas sem regra alguma em lugar nenhum,
+    logo invisíveis) ganharam estilo real em `styles.css` (global, porque o DOM que o Monaco cria
+    por conta própria não é alcançado por CSS com encapsulamento de componente do Angular)
+  - Nenhum `@Input`/`@Output` de componente existente mudou — só como/quantos ficam visíveis ao
+    mesmo tempo e a casca visual ao redor. 7 testes novos em `app.spec.ts` cobrindo o essencial de
+    lógica nova (default da aba, troca de aba, default/clamp/persistência do split ratio) — sem
+    inflar cobertura por puro CSS. **Sem verificação visual ao vivo**: a extensão Chrome
+    (`mcp__claude-in-chrome__*`) não conectou nesta sessão (mesma falha já registrada
+    anteriormente), então a validação foi por `npx ng test`/`npx ng build` verdes, revisão de CSS
+    componente a componente, e inspeção do bundle servido de verdade via `ng serve` + `curl`
+    (confirmado `vs-dark` no `main.js` e os tokens `--c2c-*` no `styles.css` compilado) — não um
+    screenshot de navegador real
 
 ## Fase 2 — Segurança / Hardening
 

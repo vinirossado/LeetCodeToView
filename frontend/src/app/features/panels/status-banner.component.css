@@ -1,11 +1,15 @@
 .banner {
-  padding: 0.75em 1em;
-  border-radius: 4px;
+  padding: var(--c2c-space-3) var(--c2c-space-4);
+  border-radius: var(--c2c-radius-sm);
   background: var(--c2c-error-bg, #fdecea);
   color: var(--c2c-error, #c0392b);
+  border: 1px solid var(--c2c-error, #c0392b);
+  font-size: 0.85rem;
+  font-weight: 500;
 }
 
 .banner.warning {
   background: var(--c2c-warning-bg, #fff8e1);
   color: var(--c2c-warning, #8a6d00);
+  border-color: var(--c2c-warning, #8a6d00);
 }

@@ -80,6 +80,14 @@ export class ExecutionSessionService {
         }
       },
       error: (err: unknown) => {
+        // `reset()` just above set status to 'pending' — if the trace fetch
+        // fails (e.g. a stale execution_id from a previous localStorage
+        // session that no longer exists once the API container has been
+        // recreated, since ExecutionStore is in-memory only), nothing else
+        // would ever move status off 'pending', leaving `isBusy` (and the
+        // "Executando…" button) stuck forever even though no run was ever
+        // actually attempted this time.
+        this.traceStore.setStatus('failed');
         this.runErrorSig.set(extractApiError(err));
       },
     });
@@ -101,6 +109,12 @@ export class ExecutionSessionService {
           next: (trace) => {
             this.traceStore.loadTrace(trace.events);
             this.traceStore.setStatus(trace.status);
+          },
+          // Same "never leave status stuck on pending/running" concern as
+          // load()'s error handler — this fallback fetch can itself fail.
+          error: (err: unknown) => {
+            this.traceStore.setStatus('failed');
+            this.runErrorSig.set(extractApiError(err));
           },
         });
       },

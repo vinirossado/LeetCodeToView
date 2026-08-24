@@ -1,4 +1,4 @@
-import { Component, computed, effect, inject, signal } from '@angular/core';
+import { Component, ElementRef, computed, effect, inject, signal, viewChild } from '@angular/core';
 import { ComplexityApiService } from './core/services/complexity-api.service';
 import { ExecutionSessionService } from './core/services/execution-session.service';
 import { TraceStoreService } from './core/services/trace-store.service';
@@ -34,6 +34,42 @@ const STARTER_CODE: Record<Language, string> = {
 /** localStorage key for the reload/reconnect fallback (spec.md "Reconexão"). */
 const LAST_EXECUTION_ID_KEY = 'code2complexity.lastExecutionId';
 
+/** localStorage key persisting the user's chosen editor/panels split ratio. */
+const SPLIT_RATIO_KEY = 'code2complexity.splitRatio';
+
+/** Fraction of the layout width given to the editor column; the resizer is clamped within this range. */
+const MIN_SPLIT_RATIO = 0.3;
+const MAX_SPLIT_RATIO = 0.75;
+const DEFAULT_SPLIT_RATIO = 0.62;
+
+/** One of the switchable right-side panel tabs (LeetCode-style Testcase/Result tabs). */
+type PanelTabId = 'variables' | 'callstack' | 'output' | 'complexity' | 'timeline';
+
+interface PanelTab {
+  readonly id: PanelTabId;
+  readonly label: string;
+}
+
+/**
+ * All five panels are tabbed rather than stacked, per the explicit redesign
+ * request ("tabs instead of stacked panels"). Complexity is a one-shot
+ * static-analysis result rather than something that changes per step, so it
+ * was considered for "always visible" instead — but it lives behind its own
+ * tab like the others because (a) it is still one signal, unaffected by
+ * switching tabs away and back, so nothing is lost by tabbing it, and (b)
+ * keeping every panel behind the same mechanism is simpler and matches what
+ * was asked for. Variables defaults active since it's the panel most
+ * referenced while stepping through a trace (mirrors LeetCode defaulting to
+ * its Testcase tab).
+ */
+const PANEL_TABS: readonly PanelTab[] = [
+  { id: 'variables', label: 'Variáveis' },
+  { id: 'callstack', label: 'Call Stack' },
+  { id: 'output', label: 'Saída' },
+  { id: 'complexity', label: 'Complexidade' },
+  { id: 'timeline', label: 'Timeline' },
+];
+
 @Component({
   selector: 'app-root',
   standalone: true,
@@ -60,6 +96,13 @@ export class App {
 
   readonly language = signal<Language>('java');
   readonly code = signal<string>(STARTER_CODE.java);
+
+  readonly panelTabs = PANEL_TABS;
+  readonly activeTab = signal<PanelTabId>('variables');
+
+  private readonly layoutHost = viewChild<ElementRef<HTMLElement>>('layoutHost');
+  readonly splitRatio = signal<number>(this.loadSplitRatio());
+  readonly isResizing = signal<boolean>(false);
 
   readonly analysisOutcome = signal<AnalysisOutcome | null>(null);
   readonly analysisLoading = signal<boolean>(false);
@@ -156,5 +199,50 @@ export class App {
       this.analysisOutcome.set(outcome);
       this.analysisLoading.set(false);
     });
+  }
+
+  onTabSelect(tab: PanelTabId): void {
+    this.activeTab.set(tab);
+  }
+
+  /**
+   * Starts a drag-to-resize gesture on the divider between the editor
+   * column and the tabbed panels column. Plain pointer events (no resize
+   * library is installed — see package.json), clamped so neither side can
+   * be dragged down to zero width.
+   */
+  onResizerPointerDown(event: PointerEvent): void {
+    event.preventDefault();
+    const layoutEl = this.layoutHost()?.nativeElement;
+    if (!layoutEl) return;
+    const rect = layoutEl.getBoundingClientRect();
+
+    this.isResizing.set(true);
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const ratio = (moveEvent.clientX - rect.left) / rect.width;
+      this.splitRatio.set(Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, ratio)));
+    };
+
+    const onPointerUp = () => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+      this.isResizing.set(false);
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(SPLIT_RATIO_KEY, String(this.splitRatio()));
+      }
+    };
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+  }
+
+  private loadSplitRatio(): number {
+    if (typeof localStorage === 'undefined') return DEFAULT_SPLIT_RATIO;
+    const stored = Number(localStorage.getItem(SPLIT_RATIO_KEY));
+    if (Number.isFinite(stored) && stored >= MIN_SPLIT_RATIO && stored <= MAX_SPLIT_RATIO) {
+      return stored;
+    }
+    return DEFAULT_SPLIT_RATIO;
   }
 }

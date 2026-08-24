@@ -1,5 +1,40 @@
+:host {
+  display: block;
+}
+
+h3 {
+  margin: 0 0 var(--c2c-space-3);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c2c-text-muted);
+}
+
+.empty {
+  color: var(--c2c-text-muted);
+  font-size: 0.85rem;
+}
+
 ol {
   margin: 0;
-  padding-left: 1.25em;
-  font-family: monospace;
+  padding-left: 0;
+  list-style: none;
+  font-family: var(--c2c-font-mono);
+  display: flex;
+  flex-direction: column;
+  gap: var(--c2c-space-1);
+}
+
+li {
+  padding: var(--c2c-space-1) var(--c2c-space-2);
+  background: var(--c2c-bg-inset);
+  border: 1px solid var(--c2c-border-subtle);
+  border-radius: var(--c2c-radius-sm);
+  color: var(--c2c-text);
+}
+
+li:first-child {
+  border-color: var(--c2c-accent);
+  color: var(--c2c-accent);
 }

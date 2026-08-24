@@ -25,7 +25,7 @@ export class ExecutionSocketService {
    */
   connect(executionId: string): Observable<ExecutionEvent> {
     return new Observable<ExecutionEvent>((subscriber) => {
-      const socket = this.wsFactory(`${this.baseUrl}/executions/${executionId}/events`);
+      const socket = this.wsFactory(this.buildUrl(`/executions/${executionId}/events`));
 
       socket.onmessage = (message: MessageEvent) => {
         try {
@@ -46,5 +46,28 @@ export class ExecutionSocketService {
 
       return () => socket.close();
     });
+  }
+
+  /**
+   * Unlike `fetch`/`<a href>`, the WebSocket constructor does NOT resolve a
+   * relative URL against the document's base URL — per spec, it parses
+   * `url` with no base, so a bare path like `/executions/:id/events`
+   * throws a synchronous `SyntaxError` ("The URL '...' is invalid").
+   * `environment.wsBaseUrl` is `''` in production on purpose (same-origin
+   * deploy, see environment.ts), so this has to build an absolute
+   * `ws:`/`wss:` URL from `location` whenever `baseUrl` is empty, rather
+   * than ever handing the browser a relative string. Found by reasoning
+   * through why executions got stuck forever showing "Executando…": the
+   * synchronous throw became an Observable `error()` (RxJS's Observable
+   * constructor forwards a synchronous throw from the subscriber function),
+   * which triggered the one-shot `GET /trace` fallback in
+   * ExecutionSessionService — firing almost immediately after `POST
+   * /executions`, while the execution was still `pending`, with nothing
+   * left to ever update the status again.
+   */
+  private buildUrl(path: string): string {
+    if (this.baseUrl) return `${this.baseUrl}${path}`;
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${scheme}://${location.host}${path}`;
   }
 }

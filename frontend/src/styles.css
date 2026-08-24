@@ -1,1 +1,128 @@
 /* You can add global styles to this file, and also import other style files */
+
+/* ------------------------------------------------------------------------
+ * Design tokens (dark theme, LeetCode-like IDE aesthetic).
+ *
+ * These are the single source of truth for color/spacing/radius across the
+ * app. Component stylesheets should reference these custom properties
+ * instead of hardcoding hex values. A couple of components already
+ * referenced `var(--c2c-*, <fallback>)` names before this token set existed
+ * (status-banner, output-panel, complexity-panel, timeline-chart) — those
+ * fallbacks are now unreachable in practice since every token they use is
+ * defined here, but they are left in place as defensive defaults.
+ * ---------------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces (layered from page background to raised elements) */
+  --c2c-bg: #1a1a1a;
+  --c2c-bg-elevated: #232323;
+  --c2c-bg-panel: #262626;
+  --c2c-bg-inset: #1e1e1e;
+  --c2c-bg-hover: #2f2f2f;
+
+  /* Borders */
+  --c2c-border: #3a3a3a;
+  --c2c-border-subtle: #2d2d2d;
+
+  /* Text */
+  --c2c-text: #e5e5e5;
+  --c2c-text-secondary: #b3b3b3;
+  --c2c-text-muted: #7a7a7a;
+
+  /* Accent (LeetCode-orange) */
+  --c2c-accent: #ffa116;
+  --c2c-accent-hover: #ffb84d;
+  --c2c-accent-contrast: #1a1a1a;
+
+  /* Semantic colors */
+  --c2c-success: #2cbb5d;
+  --c2c-success-bg: rgba(44, 187, 93, 0.12);
+  --c2c-warning: #ffc01e;
+  --c2c-warning-bg: rgba(255, 192, 30, 0.12);
+  --c2c-error: #f4534f;
+  --c2c-error-bg: rgba(244, 83, 79, 0.12);
+
+  /* Typography */
+  --c2c-font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --c2c-font-mono:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* Spacing scale */
+  --c2c-space-1: 4px;
+  --c2c-space-2: 8px;
+  --c2c-space-3: 12px;
+  --c2c-space-4: 16px;
+  --c2c-space-5: 24px;
+
+  /* Shape */
+  --c2c-radius-sm: 4px;
+  --c2c-radius: 8px;
+  --c2c-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--c2c-bg);
+  color: var(--c2c-text);
+  font-family: var(--c2c-font-sans);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+/* Dark scrollbars everywhere, matching the rest of the chrome. */
+* {
+  scrollbar-color: var(--c2c-border) var(--c2c-bg-panel);
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--c2c-bg-panel);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--c2c-border);
+  border-radius: var(--c2c-radius-sm);
+}
+
+/* ------------------------------------------------------------------------
+ * Monaco decoration classes.
+ *
+ * `app-code-editor` applies these classNames via `deltaDecorations`
+ * (code-editor.component.ts), but Monaco creates the decorated DOM nodes
+ * itself outside Angular's template rendering, so component-scoped CSS
+ * (view encapsulation) never reaches them — these must live in a global
+ * stylesheet to have any visual effect at all.
+ * ---------------------------------------------------------------------- */
+.current-line-highlight {
+  background: rgba(255, 161, 22, 0.1);
+}
+
+.current-line-glyph {
+  background: var(--c2c-accent);
+  width: 3px !important;
+  margin-left: 4px;
+}
+
+.breakpoint-glyph {
+  background: var(--c2c-error);
+  border-radius: 50%;
+  width: 8px !important;
+  height: 8px !important;
+  margin: 5px 0 0 6px;
+}

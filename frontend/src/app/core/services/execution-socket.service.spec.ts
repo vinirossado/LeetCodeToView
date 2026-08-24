@@ -1,6 +1,5 @@
 import { TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { environment } from '../../../environments/environment';
 import type { ExecutionEvent } from '../models/execution-event.model';
 import { ExecutionSocketService } from './execution-socket.service';
 import { WEBSOCKET_FACTORY, type WebSocketLike } from './websocket-factory';
@@ -59,7 +58,22 @@ describe('ExecutionSocketService', () => {
 
   it('connects to the events endpoint for the given execution id', () => {
     service.connect('exec-1').subscribe();
-    expect(sockets[0].url).toBe(`${environment.wsBaseUrl}/executions/exec-1/events`);
+    expect(sockets[0].url.endsWith('/executions/exec-1/events')).toBe(true);
+  });
+
+  it('builds an absolute ws(s):// URL from location when wsBaseUrl is empty (same-origin deploy)', () => {
+    // Regression test: unlike fetch/<a href>, `new WebSocket(url)` does NOT
+    // resolve a relative `url` against the page — it throws a synchronous
+    // SyntaxError. environment.wsBaseUrl is '' in production on purpose
+    // (see environment.ts), so ExecutionSocketService must never hand the
+    // browser a bare relative path. This bug shipped once already: the
+    // FakeSocket test double above doesn't replicate the real constructor's
+    // URL validation, so the previous (relative-URL) test above kept
+    // passing while the real app got stuck forever on "Executando…".
+    service.connect('exec-1').subscribe();
+    const url = sockets[0].url;
+    expect(url.startsWith('ws://') || url.startsWith('wss://')).toBe(true);
+    expect(url.endsWith('/executions/exec-1/events')).toBe(true);
   });
 
   it('emits one ExecutionEvent per frame, in arrival order', () => {

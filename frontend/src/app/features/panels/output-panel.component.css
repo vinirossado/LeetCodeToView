@@ -1,11 +1,36 @@
+:host {
+  display: block;
+}
+
+h3 {
+  margin: 0 0 var(--c2c-space-3);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c2c-text-muted);
+}
+
+.empty {
+  color: var(--c2c-text-muted);
+  font-size: 0.85rem;
+}
+
 pre {
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: monospace;
+  font-family: var(--c2c-font-mono);
+  font-size: 0.85rem;
+  color: var(--c2c-text);
+  background: var(--c2c-bg-inset);
+  border: 1px solid var(--c2c-border-subtle);
+  border-radius: var(--c2c-radius-sm);
+  padding: var(--c2c-space-3);
   margin: 0;
 }
 
 .error {
-  color: var(--c2c-error, #c0392b);
+  color: var(--c2c-error);
   font-weight: 600;
+  margin: var(--c2c-space-3) 0 0;
 }

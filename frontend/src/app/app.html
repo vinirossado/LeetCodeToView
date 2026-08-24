@@ -1,26 +1,26 @@
 <header class="topbar">
   <h1>Visualizador de Código, Tempo, Espaço e Execução</h1>
+
+  <div class="run-bar">
+    <label class="field">
+      <span class="field-label">Linguagem</span>
+      <select class="lang-select" [value]="language()" (change)="onLanguageChange($event)">
+        @for (lang of languages; track lang) {
+          <option [value]="lang">{{ languageLabel(lang) }}</option>
+        }
+      </select>
+    </label>
+    <button type="button" class="run-btn" (click)="onRun()" [disabled]="isBusy()">
+      {{ isBusy() ? 'Executando…' : 'Run' }}
+    </button>
+    @if (executionId()) {
+      <span class="execution-id">execution_id: {{ executionId() }}</span>
+    }
+  </div>
 </header>
 
-<main class="layout">
-  <section class="editor-column">
-    <div class="run-bar">
-      <label>
-        Linguagem
-        <select [value]="language()" (change)="onLanguageChange($event)">
-          @for (lang of languages; track lang) {
-            <option [value]="lang">{{ languageLabel(lang) }}</option>
-          }
-        </select>
-      </label>
-      <button type="button" (click)="onRun()" [disabled]="isBusy()">
-        {{ isBusy() ? 'Executando…' : 'Run' }}
-      </button>
-      @if (executionId()) {
-        <span class="execution-id">execution_id: {{ executionId() }}</span>
-      }
-    </div>
-
+<main class="layout" #layoutHost>
+  <section class="editor-column" [style.width.%]="splitRatio() * 100">
     @if (language() === 'csharp') {
       <p class="csharp-note">
         Atenção: para C#, a linha destacada abaixo é o offset de IL (não a linha real do
@@ -29,15 +29,17 @@
       </p>
     }
 
-    <app-code-editor
-      class="editor"
-      [language]="language()"
-      [value]="code()"
-      [currentLine]="currentLine()"
-      [breakpoints]="breakpoints()"
-      (valueChange)="code.set($event)"
-      (breakpointToggle)="onBreakpointToggle($event)"
-    />
+    <div class="editor-shell">
+      <app-code-editor
+        class="editor"
+        [language]="language()"
+        [value]="code()"
+        [currentLine]="currentLine()"
+        [breakpoints]="breakpoints()"
+        (valueChange)="code.set($event)"
+        (breakpointToggle)="onBreakpointToggle($event)"
+      />
+    </div>
 
     @if (runError()) {
       <p class="error">{{ runError() }}</p>
@@ -58,11 +60,49 @@
     <app-status-banner [terminalEvent]="terminalEvent()" />
   </section>
 
+  <div
+    class="resizer"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Redimensionar editor e painéis"
+    [class.active]="isResizing()"
+    (pointerdown)="onResizerPointerDown($event)"
+  ></div>
+
   <section class="panels-column">
-    <app-variables-panel [language]="language()" [currentStep]="currentStep()" />
-    <app-call-stack-panel [stack]="currentStack()" />
-    <app-output-panel [output]="outputSoFar()" [errorMessage]="outputErrorMessage()" />
-    <app-complexity-panel [outcome]="analysisOutcome()" [loading]="analysisLoading()" />
-    <app-timeline-chart [steps]="steps()" [currentStepIndex]="currentStepIndex()" />
+    <div class="tab-bar" role="tablist">
+      @for (tab of panelTabs; track tab.id) {
+        <button
+          type="button"
+          role="tab"
+          class="tab-btn"
+          [class.active]="activeTab() === tab.id"
+          [attr.aria-selected]="activeTab() === tab.id"
+          (click)="onTabSelect(tab.id)"
+        >
+          {{ tab.label }}
+        </button>
+      }
+    </div>
+
+    <div class="tab-panel">
+      @switch (activeTab()) {
+        @case ('variables') {
+          <app-variables-panel [language]="language()" [currentStep]="currentStep()" />
+        }
+        @case ('callstack') {
+          <app-call-stack-panel [stack]="currentStack()" />
+        }
+        @case ('output') {
+          <app-output-panel [output]="outputSoFar()" [errorMessage]="outputErrorMessage()" />
+        }
+        @case ('complexity') {
+          <app-complexity-panel [outcome]="analysisOutcome()" [loading]="analysisLoading()" />
+        }
+        @case ('timeline') {
+          <app-timeline-chart [steps]="steps()" [currentStepIndex]="currentStepIndex()" />
+        }
+      }
+    </div>
   </section>
 </main>

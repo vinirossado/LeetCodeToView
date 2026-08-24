@@ -1,12 +1,39 @@
 .controls {
   display: flex;
   align-items: center;
-  gap: 0.5em;
+  gap: var(--c2c-space-2);
   flex-wrap: wrap;
+  background: var(--c2c-bg-elevated);
+  border: 1px solid var(--c2c-border);
+  border-radius: var(--c2c-radius);
+  padding: var(--c2c-space-2) var(--c2c-space-3);
+}
+
+button {
+  background: var(--c2c-bg-panel);
+  color: var(--c2c-text);
+  border: 1px solid var(--c2c-border);
+  border-radius: var(--c2c-radius-sm);
+  padding: 0.35em 0.6em;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--c2c-bg-hover);
+  border-color: var(--c2c-accent);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .count {
   margin-left: auto;
-  font-size: 0.85em;
-  opacity: 0.75;
+  font-size: 0.8rem;
+  color: var(--c2c-text-muted);
 }
