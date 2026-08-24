@@ -54,7 +54,14 @@ test('renders each stdout line on its own line instead of running them together'
   await expect(runButton).toHaveText('Run', { timeout: 20_000 });
 
   await page.getByRole('tab', { name: 'Saída' }).click();
-  const outputText = await page.locator('pre').innerText();
+  const output = page.locator('pre');
+  // The button reads "Run" as soon as the execution's terminal status
+  // lands, which can be a beat ahead of the trailing stdout event(s) for
+  // the final loop iteration reaching the DOM — wait for the last expected
+  // line rather than snapshotting text right away, to avoid a race with
+  // that in-flight render.
+  await expect(output).toContainText('10');
+  const outputText = await output.innerText();
 
   expect(outputText).not.toContain('013610');
   expect(outputText.split('\n').map((line) => line.trim())).toEqual(

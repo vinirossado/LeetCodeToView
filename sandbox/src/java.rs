@@ -114,6 +114,18 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         // stderr-scanning code at all.
         "--",
         "/usr/bin/java",
+        // -Xlog:os+container=off: nsjail's --chroot / cgroup-per-jail setup
+        // (cgroup path 'NSJAIL.<pid>' instead of a normal container path)
+        // makes the JVM's own container-detection log a *guaranteed*
+        // "[warning][os,container] Cgroup ... controller path ... seems to
+        // have moved ..." on every single run, for both the driver JVM here
+        // and the target JVM launched below — harmless (heap/metaspace
+        // limits are already pinned explicitly via -Xmx/-XX:MaxMetaspaceSize,
+        // not cgroup-autodetected) but it shares this process's real stdout
+        // with the sandboxed program's own output (see events::run_nsjail),
+        // so it was leaking into the user-facing stdout panel. This flag
+        // only silences that log tag, it doesn't disable container support.
+        "-Xlog:os+container=off",
         "-XX:CompressedClassSpaceSize=64m",
         "-Xmx128m",
         &format!("-Dspike.sample={}", opts.sample_n),
@@ -121,7 +133,7 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         "Debugger",
         class_name,
         &format!(
-            "-XX:CompressedClassSpaceSize=64m -cp {} -Xmx256m -XX:MaxMetaspaceSize=64m",
+            "-Xlog:os+container=off -XX:CompressedClassSpaceSize=64m -cp {} -Xmx256m -XX:MaxMetaspaceSize=64m",
             src_dir.to_str().unwrap()
         ),
     ]);

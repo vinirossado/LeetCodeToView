@@ -20,6 +20,14 @@ e2e/playwright-report/
 e2e/test-results/
 e2e/blob-report/
 
+# Deploy secrets — real .env files never committed, only the .example
+# templates (deploy.sh/deploy-fe.sh source these paths on the VPS, never
+# from this repo checkout).
+.env
+.env.*
+!.env.example
+!.env.frontend.example
+
 # Editores/SO
 .DS_Store
 *.swp
