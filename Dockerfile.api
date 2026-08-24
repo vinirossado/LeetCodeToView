@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libicu-dev \
     python3 \
     maven \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # .NET SDK — same install approach as sandbox/Dockerfile (no apt package)
