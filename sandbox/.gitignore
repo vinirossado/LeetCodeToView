@@ -4,3 +4,5 @@ hs_err_pid*.log
 test-snippets-csharp/**/bin
 test-snippets-csharp/**/obj
 test-snippets-csharp/**/out
+test-snippets-csharp/**/outdebug
+test-snippets-csharp/*.log
