@@ -145,17 +145,47 @@ fn build_method(node: Node, src: &[u8]) -> MethodIR {
         })
         .unwrap_or_default();
 
-    let body = node
-        .child_by_field_name("body")
-        .filter(|b| b.kind() == "block")
+    let body_node = node.child_by_field_name("body").filter(|b| b.kind() == "block");
+    let mut body = body_node
         .map(|b| build_block(b, src, &name, false))
         .unwrap_or_default();
+
+    // Mirrors the Java adapter's fix: recursion is branching (fibonacci-like)
+    // based on how many times the method calls itself across its ENTIRE body,
+    // not just within one statement — two separate `Sort(...)` calls in sibling
+    // statements (e.g. merge sort) branch just as much as `Fib(n-1) + Fib(n-2)`
+    // in a single return. Recount here and overwrite every `Recursion` node's
+    // `call_sites` so both shapes are judged by the same method-wide total.
+    if let Some(b) = body_node {
+        let total_calls = count_self_calls(b, src, &name);
+        if total_calls > 0 {
+            set_recursion_call_sites(&mut body, total_calls);
+        }
+    }
 
     MethodIR {
         name,
         line: node.start_position().row + 1,
         params,
         body,
+    }
+}
+
+fn set_recursion_call_sites(nodes: &mut [ControlNode], total: usize) {
+    for node in nodes.iter_mut() {
+        match node {
+            ControlNode::Recursion { call_sites, .. } => *call_sites = total,
+            ControlNode::Sequential(inner) => set_recursion_call_sites(inner, total),
+            ControlNode::Loop { body, .. } => set_recursion_call_sites(body, total),
+            ControlNode::Conditional { branches } => {
+                for b in branches.iter_mut() {
+                    set_recursion_call_sites(b, total);
+                }
+            }
+            ControlNode::DataDependentExit { .. }
+            | ControlNode::Allocation { .. }
+            | ControlNode::Leaf => {}
+        }
     }
 }
 

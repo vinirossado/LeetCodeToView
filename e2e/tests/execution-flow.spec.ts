@@ -69,6 +69,35 @@ test('renders each stdout line on its own line instead of running them together'
   );
 });
 
+test('does not leak the JVM\'s own container-detection warnings into the stdout panel', async ({ page }) => {
+  // Regression test for a second, separate bug: nsjail's cgroup-per-jail
+  // setup (a 'NSJAIL.<pid>' cgroup path instead of a normal container path)
+  // makes the JVM print "[warning][os,container] Cgroup ... controller
+  // path ... seems to have moved ..." on every run, for both the JDI driver
+  // JVM and the target JVM it launches (java.rs). That's HotSpot's own
+  // unified logging, on by default, sharing this process's real stdout
+  // with the sandboxed program's output (events::run_nsjail relays both on
+  // the same stream) — so it always ended up in the user-facing Saída
+  // panel. Fixed by passing -Xlog:os+container=off to both JVM invocations
+  // in java.rs (the heap/metaspace limits are already pinned explicitly
+  // via -Xmx/-XX:MaxMetaspaceSize, not cgroup-autodetected, so silencing
+  // this log tag has no behavioral effect).
+  await page.goto('/');
+
+  const runButton = page.getByRole('button', { name: /Run|Executando/ });
+  await runButton.click();
+  await expect(runButton).toHaveText('Run', { timeout: 20_000 });
+
+  await page.getByRole('tab', { name: 'Saída' }).click();
+  const output = page.locator('pre');
+  await expect(output).toContainText('10');
+  const outputText = await output.innerText();
+
+  expect(outputText).not.toContain('Cgroup');
+  expect(outputText).not.toContain('os,container');
+  expect(outputText.split('\n').map((line) => line.trim())).toEqual(['0', '1', '3', '6', '10']);
+});
+
 test('runs the C# starter example end to end and shows the known local_N/PDB disclaimer', async ({ page }) => {
   await page.goto('/');
 
