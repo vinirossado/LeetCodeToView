@@ -64,6 +64,12 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         std::process::exit(1);
     }
 
+    // ProcessSandboxRunner (the API, running as root) creates the workdir
+    // via Java's Files.createTempDirectory, which is 0700 regardless of
+    // umask — unreadable by the non-root uid nsjail maps the jailed process
+    // to below. See events::make_world_readable's doc comment.
+    events::make_world_readable(src_dir).expect("falha ao ajustar permissões do workdir");
+
     eprintln!("[sandbox-runner/java] rodando {class_name} isolado via nsjail...");
 
     let mut cmd = Command::new("nsjail");
@@ -101,6 +107,23 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         // caveat already documented for cgroup_mem_max.
         "--cgroup_mem_swap_max", "0",
         "--cgroup_pids_max", "512",
+        // Non-root inside the jail (Fase 2 "Sem privilégios" — see
+        // tasks.md). NOT nsjail's simpler --user/--group: those always map
+        // the inside uid back to nsjail's OWN (root) uid outside the
+        // namespace, and nsjail's own log even warns about it ("will have
+        // user root-level access to files") — confirmed empirically with a
+        // manual nsjail run, not just from the warning text: the process
+        // still had genuine root-level DAC access despite getuid()/ps
+        // showing "nobody". --uid_mapping/--gid_mapping instead map to a
+        // REAL unprivileged uid (65534, nobody/nogroup) outside the
+        // namespace too — validated with the same manual test, no warning,
+        // and a real Java program (reading its own source file, spawning a
+        // subprocess) ran correctly with genuine uid=65534/gid=65534
+        // throughout. Requires newuidmap/newgidmap + /etc/subuid/subgid
+        // delegation for root (see Dockerfile.api) — nsjail shells out to
+        // those even though it's already running as real root.
+        "--uid_mapping", "65534:65534:1",
+        "--gid_mapping", "65534:65534:1",
         "--chroot", "/",
         "--cwd", src_dir.to_str().unwrap(),
         // NOT --quiet: nsjail's own INFO-level log line ("run time >= time

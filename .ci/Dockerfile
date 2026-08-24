@@ -126,7 +126,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnl-route-3-200 \
     libcap2 \
     libseccomp2 \
+    # uidmap: provides newuidmap/newgidmap — see Dockerfile.api's identical
+    # comment for why nsjail's --uid_mapping/--gid_mapping (not the simpler
+    # --user/--group) is what actually achieves non-root sandboxed
+    # execution, and why this package is required for that.
+    uidmap \
     && rm -rf /var/lib/apt/lists/*
+
+# See Dockerfile.api's identical comment: newuidmap/newgidmap require this
+# delegation even for real root.
+RUN echo "root:65534:1" > /etc/subuid && echo "root:65534:1" > /etc/subgid
 
 # JDK 25 to run the Quarkus API jar itself (same package/symlink approach
 # as the build stage — this is a separate apt install because this is a

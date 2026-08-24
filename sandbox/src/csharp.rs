@@ -126,13 +126,25 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
 
     let self_exe = std::env::current_exe().expect("não achou o próprio binário");
 
+    // Same reason as java.rs's identical call: ProcessSandboxRunner (API,
+    // running as root) creates the workdir via Files.createTempDirectory
+    // (0700 regardless of umask) — unreadable by the non-root uid nsjail
+    // maps the jailed process to below. See make_world_readable's doc
+    // comment. IMPORTANT: chmod from the workdir itself (cwd's PARENT, e.g.
+    // `.../code2complexity-<uuid>`), not just `cwd` (`.../out`) — chdir()
+    // needs traverse permission on every path component up to `--cwd`, and
+    // ProcessSandboxRunner.compileCsharp puts the dll in a `out/`
+    // subdirectory of the 0700 workdir, so fixing only `out/` would still
+    // leave the workdir itself blocking traversal into it.
+    let workdir = cwd.parent().unwrap_or(cwd);
+    events::make_world_readable(workdir).expect("falha ao ajustar permissões do workdir");
+
     eprintln!("[sandbox-runner/csharp] rodando {dll_file:?} isolado via nsjail (self re-exec)...");
 
     let mut cmd = Command::new("nsjail");
     cmd.args([
         "--mode", "o",
         "--time_limit", &opts.time_limit_secs,
-        "--keep_caps", // TODO(Fase 2): trocar por capabilities mínimas quando isso for resolvido
         "--rlimit_fsize", "inf",
         "--tmpfsmount", "/tmp",
         "--rlimit_as", "3072",
@@ -146,6 +158,14 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
         // immediate cgroup OOM kill instead of swap thrashing the host.
         "--cgroup_mem_swap_max", "0",
         "--cgroup_pids_max", "256",
+        // Non-root inside the jail — see java.rs's identical flag for the
+        // full rationale (why --uid_mapping/--gid_mapping, not the simpler
+        // --user/--group). NOTE: --keep_caps above still retains the full
+        // capability set (CAP_DAC_OVERRIDE included) regardless of uid, so
+        // this alone does not yet give C# the same real privilege
+        // separation Java gets — see the TODO on --keep_caps.
+        "--uid_mapping", "65534:65534:1",
+        "--gid_mapping", "65534:65534:1",
         "--chroot", "/",
         "--cwd", cwd.to_str().unwrap(),
         "--env", "DOTNET_ROOT=/usr/share/dotnet",

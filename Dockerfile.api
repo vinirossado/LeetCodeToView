@@ -30,7 +30,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     maven \
     unzip \
+    # uidmap: provides newuidmap/newgidmap, needed by nsjail's
+    # --uid_mapping/--gid_mapping (java.rs/csharp.rs) to map the sandboxed
+    # process to a REAL non-root uid outside the jail's user namespace.
+    # nsjail's simpler --user/--group flags looked sufficient at first but
+    # aren't: they always map the inside uid back to nsjail's own (root)
+    # uid, and nsjail itself warns about this ("will have user root-level
+    # access to files") — confirmed empirically, not just from the log
+    # message: reproduced with a manual nsjail run, root DAC access was
+    # still real despite getuid()/ps showing "nobody". --uid_mapping maps
+    # to a genuinely different, unprivileged outside uid instead.
+    uidmap \
     && rm -rf /var/lib/apt/lists/*
+
+# newuidmap/newgidmap refuse to map any range not delegated to the calling
+# user via /etc/subuid/subgid, even when that user is real root — confirmed
+# empirically (nsjail failed with "gid range ... not allowed" before this).
+# Delegates exactly the one uid/gid (65534, nobody/nogroup) java.rs/csharp.rs
+# actually map sandboxed executions to.
+RUN echo "root:65534:1" > /etc/subuid && echo "root:65534:1" > /etc/subgid
 
 # .NET SDK — same install approach as sandbox/Dockerfile (no apt package)
 RUN curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \

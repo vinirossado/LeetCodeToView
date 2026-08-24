@@ -202,3 +202,32 @@ pub fn run_nsjail(mut cmd: Command) -> RunResult {
 
     RunResult { status, outcome, stderr_lines }
 }
+
+/// Recursively chmods everything under `root` so the nsjailed process can
+/// read (and, for directories, traverse) it after nsjail maps it to a
+/// non-root uid/gid (see java.rs/csharp.rs's `--uid_mapping`/`--gid_mapping`).
+///
+/// Needed because the API (`ProcessSandboxRunner`, running as root) creates
+/// the per-execution workdir via Java's `Files.createTempDirectory`, which
+/// deliberately ignores the process umask and creates directories `0700`
+/// (owner-only) for security — reasonable for a plain temp dir, but it means
+/// a process mapped to a different, unprivileged uid gets `EACCES` on
+/// `chdir()` into it. Confirmed empirically, not assumed: nsjail failed with
+/// `chdir(...): Permission denied` the first time `--uid_mapping` was added,
+/// before this existed. `0755` for directories (traverse+read) and `0644`
+/// for files (read) — sandboxed code never needs to write back into its own
+/// source/workdir, only read it and produce stdout.
+pub fn make_world_readable(root: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::metadata(root)?;
+    let mode = if metadata.is_dir() { 0o755 } else { 0o644 };
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode))?;
+
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(root)? {
+            make_world_readable(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
