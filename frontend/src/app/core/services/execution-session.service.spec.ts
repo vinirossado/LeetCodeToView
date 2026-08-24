@@ -49,6 +49,47 @@ describe('ExecutionSessionService', () => {
     trace = TestBed.inject(TraceStoreService);
   });
 
+  describe('isBusy()', () => {
+    it('starts false — a fresh session with no run/load ever attempted is not busy', () => {
+      // Regression test for a real bug found via Playwright E2E: isBusy was
+      // previously derived from `traceStore.status()`, which defaults to
+      // 'pending' even before any execution has ever been started. That
+      // made the Run button permanently disabled/stuck on "Executando…"
+      // from the very first render of a brand-new session — not an edge
+      // case, the default state.
+      expect(session.isBusy()).toBe(false);
+    });
+
+    it('is true while a run is in flight and false again once it completes', () => {
+      expect(session.isBusy()).toBe(false);
+
+      session.run('java', 'int x = 1;');
+      expect(session.isBusy()).toBe(true);
+
+      createExecution$.next({ execution_id: 'exec-42' });
+      expect(session.isBusy()).toBe(true);
+
+      wsEvents$.complete();
+      expect(session.isBusy()).toBe(false);
+    });
+
+    it('is false again after the POST itself fails', () => {
+      session.run('java', '');
+      expect(session.isBusy()).toBe(true);
+
+      createExecution$.error(new HttpErrorResponse({ status: 422, error: { error: 'code is required' } }));
+      expect(session.isBusy()).toBe(false);
+    });
+
+    it('is false immediately after load() resolves an already-finished trace (no WebSocket to wait on)', () => {
+      session.load('exec-99');
+      expect(session.isBusy()).toBe(true);
+
+      getTrace$.next({ execution_id: 'exec-99', status: 'completed', events: [step(1)] });
+      expect(session.isBusy()).toBe(false);
+    });
+  });
+
   describe('run()', () => {
     it('POSTs the execution, then connects the WebSocket with the returned id', () => {
       session.run('java', 'int x = 1;');

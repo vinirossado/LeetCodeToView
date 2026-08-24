@@ -1,6 +1,10 @@
 <div class="controls">
   <button type="button" title="Ir para o início" (click)="jumpToStart.emit()" [disabled]="!hasStarted()">
-    ⏹
+    <!-- skip-to-start: bar + triangle pointing left -->
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+      <rect x="3" y="3" width="1.5" height="10" />
+      <path d="M13 3.5 6 8l7 4.5z" />
+    </svg>
   </button>
   <button
     type="button"
@@ -8,13 +12,24 @@
     (click)="runToPreviousBreakpoint.emit()"
     [disabled]="!hasStarted()"
   >
-    ⏮ breakpoint anterior
+    <!-- step-back-to-marker: triangle pointing left + dot -->
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+      <path d="M11 3.5 4 8l7 4.5z" />
+      <circle cx="13.5" cy="8" r="1.5" />
+    </svg>
+    <span class="btn-label">breakpoint anterior</span>
   </button>
   <button type="button" title="Passo anterior" (click)="stepBack.emit()" [disabled]="!hasStarted()">
-    ⏮
+    <!-- step-back: single triangle pointing left -->
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+      <path d="M11 3.5 4 8l7 4.5z" />
+    </svg>
   </button>
   <button type="button" title="Próximo passo" (click)="stepForward.emit()" [disabled]="atEnd()">
-    ⏭
+    <!-- step-forward: single triangle pointing right -->
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+      <path d="M5 3.5 12 8l-7 4.5z" />
+    </svg>
   </button>
   <button
     type="button"
@@ -22,10 +37,19 @@
     (click)="runToNextBreakpoint.emit()"
     [disabled]="atEnd()"
   >
-    ⏭ próximo breakpoint
+    <!-- step-forward-to-marker: triangle pointing right + dot -->
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+      <path d="M5 3.5 12 8l-7 4.5z" />
+      <circle cx="2.5" cy="8" r="1.5" />
+    </svg>
+    <span class="btn-label">próximo breakpoint</span>
   </button>
   <button type="button" title="Ir para o fim" (click)="jumpToEnd.emit()" [disabled]="atEnd()">
-    ⏩
+    <!-- skip-to-end: triangle pointing right + bar -->
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+      <path d="M3 3.5 10 8l-7 4.5z" />
+      <rect x="11.5" y="3" width="1.5" height="10" />
+    </svg>
   </button>
   <span class="count">{{ totalSteps() }} passos no trace</span>
 </div>

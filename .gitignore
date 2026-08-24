@@ -15,6 +15,11 @@ out/
 node_modules/
 dist/
 
+# Playwright (e2e/)
+e2e/playwright-report/
+e2e/test-results/
+e2e/blob-report/
+
 # Editores/SO
 .DS_Store
 *.swp

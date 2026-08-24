@@ -1,5 +1,5 @@
 import { HttpErrorResponse } from '@angular/common/http';
-import { Injectable, computed, inject, signal } from '@angular/core';
+import { Injectable, inject, signal } from '@angular/core';
 import type { Subscription } from 'rxjs';
 import type { ApiErrorResponse } from '../models/execution.model';
 import type { Language } from '../models/language';
@@ -37,20 +37,30 @@ export class ExecutionSessionService {
 
   private readonly executionIdSig = signal<string | null>(null);
   private readonly runErrorSig = signal<string | null>(null);
+  // Deliberately a dedicated signal, NOT derived from `traceStore.status()`.
+  // TraceStoreService defaults (and resets) to 'pending' — a value it also
+  // uses mid-run for "execution created, not running yet". Deriving isBusy
+  // from that status alone meant a completely fresh app (no run ever
+  // attempted) read as "busy" from the very first render, permanently
+  // disabling the Run button with no run in flight. Found via a Playwright
+  // E2E test that clicked Run on a fresh page and discovered the button was
+  // ALREADY disabled before the click. This signal instead tracks "a
+  // run()/load() was invoked and hasn't reached a terminal outcome yet",
+  // starting false and explicitly flipped at every terminal transition
+  // below (success, error, and every fallback's own error).
+  private readonly busySig = signal<boolean>(false);
   private wsSubscription: Subscription | null = null;
 
   readonly executionId = this.executionIdSig.asReadonly();
   readonly runError = this.runErrorSig.asReadonly();
-  readonly isBusy = computed(() => {
-    const status = this.traceStore.status();
-    return status === 'pending' || status === 'running';
-  });
+  readonly isBusy = this.busySig.asReadonly();
 
   run(language: Language, code: string): void {
     this.wsSubscription?.unsubscribe();
     this.traceStore.reset();
     this.runErrorSig.set(null);
     this.executionIdSig.set(null);
+    this.busySig.set(true);
 
     this.api.createExecution({ language, code }).subscribe({
       next: ({ execution_id }) => {
@@ -60,6 +70,7 @@ export class ExecutionSessionService {
       },
       error: (err: unknown) => {
         this.traceStore.setStatus('failed');
+        this.busySig.set(false);
         this.runErrorSig.set(extractApiError(err));
       },
     });
@@ -70,6 +81,7 @@ export class ExecutionSessionService {
     this.traceStore.reset();
     this.runErrorSig.set(null);
     this.executionIdSig.set(executionId);
+    this.busySig.set(true);
 
     this.api.getTrace(executionId).subscribe({
       next: (trace) => {
@@ -77,17 +89,17 @@ export class ExecutionSessionService {
         this.traceStore.setStatus(trace.status);
         if (trace.status === 'pending' || trace.status === 'running') {
           this.streamLive(executionId, trace.events.length);
+        } else {
+          this.busySig.set(false);
         }
       },
       error: (err: unknown) => {
-        // `reset()` just above set status to 'pending' — if the trace fetch
-        // fails (e.g. a stale execution_id from a previous localStorage
-        // session that no longer exists once the API container has been
-        // recreated, since ExecutionStore is in-memory only), nothing else
-        // would ever move status off 'pending', leaving `isBusy` (and the
-        // "Executando…" button) stuck forever even though no run was ever
-        // actually attempted this time.
+        // A stale execution_id from a previous localStorage session (see
+        // app.ts's constructor) can point at an execution that no longer
+        // exists once the API's in-memory ExecutionStore has been reset
+        // (e.g. the container was recreated) — GET /trace 404s here.
         this.traceStore.setStatus('failed');
+        this.busySig.set(false);
         this.runErrorSig.set(extractApiError(err));
       },
     });
@@ -109,11 +121,13 @@ export class ExecutionSessionService {
           next: (trace) => {
             this.traceStore.loadTrace(trace.events);
             this.traceStore.setStatus(trace.status);
+            this.busySig.set(false);
           },
-          // Same "never leave status stuck on pending/running" concern as
-          // load()'s error handler — this fallback fetch can itself fail.
+          // Same "never leave busy stuck forever" concern as load()'s error
+          // handler — this fallback fetch can itself fail.
           error: (err: unknown) => {
             this.traceStore.setStatus('failed');
+            this.busySig.set(false);
             this.runErrorSig.set(extractApiError(err));
           },
         });
@@ -121,6 +135,7 @@ export class ExecutionSessionService {
       complete: () => {
         const terminal = this.traceStore.terminalEvent();
         this.traceStore.setStatus(terminal?.type === 'error' ? 'failed' : 'completed');
+        this.busySig.set(false);
       },
     });
   }
