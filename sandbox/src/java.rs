@@ -71,7 +71,18 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         "--mode", "o",
         "--time_limit", &opts.time_limit_secs,
         "--rlimit_as", "3072",
-        "--rlimit_cpu", "10",
+        // Was hardcoded to "10" independent of --time_limit — a latent
+        // mismatch found while testing stack-overflow detection (Fase 2):
+        // a CPU-bound target could get SIGKILLed by RLIMIT_CPU exhaustion
+        // at a DIFFERENT time than nsjail's own --time_limit, and that
+        // SIGKILL looks identical (exit 137, no nsjail marker) to a cgroup
+        // OOM kill — see the ambiguity noted in Debugger.java and
+        // csharp.rs's run_worker. Tying it to time_limit_secs (same pattern
+        // already used in csharp.rs) removes one avoidable source of that
+        // ambiguity, even though it doesn't eliminate it (RLIMIT_CPU is
+        // still a distinct mechanism from --time_limit and from cgroup
+        // memory, just no longer skewed to a different budget).
+        "--rlimit_cpu", &opts.time_limit_secs,
         "--rlimit_nproc", "512",
         "--rlimit_nofile", "1024",
         "--use_cgroupv2",

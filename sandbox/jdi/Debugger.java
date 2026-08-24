@@ -145,13 +145,18 @@ public class Debugger {
         //
         // Fix: check the target's own exit value. On Linux, a process
         // killed by signal N conventionally reports 128+N here — the same
-        // convention nsjail itself uses (see events.rs). In this sandbox,
-        // nothing else configured for the jail can deliver an external
-        // SIGKILL to just the target process alone (--time_limit and
-        // --rlimit_cpu act on the whole jailed process tree, which would
-        // kill THIS process too and is already caught one level up), so an
-        // unexplained SIGKILL (exit value 137) of only the target is our
-        // best signal that the cgroup OOM killer picked it specifically.
+        // convention nsjail itself uses (see events.rs). Best-effort, same
+        // spirit as events::run_nsjail's LikelyOom heuristic one level up:
+        // exit value 137 (SIGKILL) here is attributed to memory_limit_exceeded
+        // since cgroup OOM is the most likely cause, but it is NOT
+        // unambiguous — RLIMIT_CPU exhaustion of just this thread (a
+        // different kernel mechanism, also delivered as SIGKILL, also with
+        // no nsjail-level marker) would look identical from here. Reduced
+        // that specific overlap by tying java.rs's --rlimit_cpu to the same
+        // configurable time_limit_secs nsjail's --time_limit uses (was
+        // hardcoded to a fixed 10s before, an avoidable source of exactly
+        // this ambiguity), but the two mechanisms remain distinct so a false
+        // positive is still possible in principle.
         try {
             int exitValue = vm.process().exitValue();
             if (exitValue == 137) {
