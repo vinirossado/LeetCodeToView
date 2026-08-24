@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { replaceEditorContent } from './support/monaco';
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => localStorage.clear());
@@ -153,15 +154,15 @@ test('rejects Java code without a class named Main with a clear inline error, no
   // The Monaco editor's content is what gets submitted — select all and
   // replace with code missing the required `class Main` (see
   // ExecutionsResource's server-side validation, api/src/main/java/.../web/ExecutionsResource.java).
-  // Found empirically: clicking the `.view-lines` *container* (rather than
-  // a specific `.view-line`) places the caret ambiguously (observed landing
-  // at the very end of the buffer), and Playwright's `ControlOrMeta+a`
-  // shorthand did not trigger Monaco's select-all in that state either —
-  // only clicking a specific line plus the platform-explicit shortcut
-  // reliably replaces the whole buffer.
-  await page.locator('.view-line').first().click();
-  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a');
-  await page.keyboard.type('class Solution { void run() {} }');
+  // Uses replaceEditorContent (support/monaco.ts) rather than a raw
+  // click+press+type sequence: two separate, empirically-confirmed races
+  // in the naive version made this flaky (see that helper's doc comment).
+  // Notably, this test's own assertion happened to still pass even while
+  // silently corrupted by the first race (the leftover Main.java filename
+  // in the compiler error's location prefix satisfies
+  // `.toContainText('Main')` regardless of the actual submitted code) —
+  // so it was testing the wrong thing until this was found and fixed.
+  await replaceEditorContent(page, 'class Solution { void run() {} }');
 
   await page.getByRole('button', { name: 'Run' }).click();
 
@@ -176,4 +177,44 @@ test('switches between all five panel tabs', async ({ page }) => {
     await page.getByRole('tab', { name: tab }).click();
     await expect(page.getByRole('tab', { name: tab })).toHaveAttribute('aria-selected', 'true');
   }
+});
+
+test('blocks Java code that spawns a real thread, with a clear message instead of a silent hang or a false completion', async ({
+  page,
+}) => {
+  // Regression coverage for the multi-thread event model decision
+  // (spec.md "Multi-thread", pending since Fase 1): blocked in the MVP.
+  // Detected at runtime by jdi/Debugger.java (a JVM ThreadGroup check,
+  // empirically validated — see tasks.md/sandbox/jdi/Debugger.java for the
+  // false-positive found and fixed along the way). Java-only: the
+  // equivalent C# detection (sandbox/src/com.rs) is deliberately NOT
+  // covered by an E2E test here — it was empirically found to be
+  // unreliable (a separate, pre-existing ICorDebug stepper stall inside
+  // `Thread.Start()`'s own internals sometimes prevents the detection from
+  // ever firing, documented in tasks.md/com.rs) and a flaky E2E test would
+  // be worse than no test at all.
+  await page.goto('/');
+
+  // insertText, not type: see the "rejects Java code without a class named
+  // Main" test above for why `type` corrupts brace/paren/quote-heavy
+  // content on this Monaco editor (confirmed to be the actual cause of
+  // this test's flakiness, not the multi-thread detection it's meant to
+  // exercise — reproduced with a throwaway debug test dumping the
+  // post-type buffer content: the submitted code silently kept 9 stale
+  // lines of the starter example, so the request failed at compile time
+  // and never reached the JDI multi-thread check at all).
+  await page.locator('.view-line').first().click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a');
+  await page.keyboard.insertText(
+    'class Main { public static void main(String[] a) throws InterruptedException { ' +
+      'Thread t = new Thread(() -> System.out.println("hi")); t.start(); t.join(); } }',
+  );
+
+  const runButton = page.getByRole('button', { name: /Run|Executando/ });
+  await runButton.click();
+  await expect(runButton).toHaveText('Run', { timeout: 20_000 });
+
+  await expect(page.locator('.banner')).toContainText('multi-thread execution is not supported yet', {
+    timeout: 10_000,
+  });
 });

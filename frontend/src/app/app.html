@@ -35,6 +35,7 @@
         [language]="language()"
         [value]="code()"
         [currentLine]="currentLine()"
+        [stoppedAtBreakpoint]="landedViaBreakpoint()"
         [breakpoints]="breakpoints()"
         (valueChange)="code.set($event)"
         (breakpointToggle)="onBreakpointToggle($event)"

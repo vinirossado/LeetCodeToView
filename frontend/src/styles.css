@@ -119,6 +119,24 @@ body {
   margin-left: 4px;
 }
 
+/* Distinguishes an actual breakpoint hit (runToNextBreakpoint/
+ * runToPreviousBreakpoint landing on a matched step) from ordinary
+ * step-by-step navigation — same layout as `.current-line-highlight`/
+ * `.current-line-glyph`, but red instead of the accent color, so it's
+ * visually obvious execution actually stopped at the breakpoint (as
+ * opposed to silently running past it to the end because it was set on a
+ * line with no line-table entry — see trace-store.service.ts's
+ * `landedViaBreakpoint`). */
+.current-line-breakpoint-hit {
+  background: var(--c2c-error-bg);
+}
+
+.current-line-breakpoint-hit-glyph {
+  background: var(--c2c-error);
+  width: 3px !important;
+  margin-left: 4px;
+}
+
 .breakpoint-glyph {
   background: var(--c2c-error);
   border-radius: 50%;

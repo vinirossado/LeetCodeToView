@@ -349,6 +349,14 @@ pub fn run_worker(dll_file: &Path) -> i32 {
         if unsafe { com::PROCESS_EXITED } {
             break;
         }
+        // Checked here (not just after the loop, as FATAL_ERROR used to be)
+        // so a callback-detected fatal condition — e.g. the multi-thread
+        // block below — ends the run immediately instead of idling up to
+        // the full deadline waiting for a PROCESS_EXITED that may never
+        // come (the debuggee is still running when we detect this).
+        if unsafe { com::FATAL_ERROR } {
+            return 1;
+        }
         if Instant::now() > run_deadline {
             return 1;
         }

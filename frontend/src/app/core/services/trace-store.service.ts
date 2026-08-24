@@ -30,6 +30,13 @@ import type { ExecutionStatus } from '../models/execution.model';
  * breakpoint run that doesn't land on the tip...), we stop yanking their view
  * forward on every new event. Landing back exactly on the tip (jumpToEnd, or
  * naturally stepping/searching forward into it) re-arms following.
+ *
+ * A breakpoint whose line matches an incoming step while following live
+ * stops that auto-follow right there instead of racing on to the tip —
+ * this is what makes clicking "Run" with a breakpoint set feel like it
+ * actually paused execution, even though the sandbox already ran the whole
+ * program start-to-finish and this is just client-side replay catching up
+ * to a marked line as events stream in.
  */
 @Injectable({ providedIn: 'root' })
 export class TraceStoreService {
@@ -38,11 +45,14 @@ export class TraceStoreService {
   private readonly followLiveSig = signal<boolean>(true);
   private readonly breakpointsSig = signal<ReadonlySet<number>>(new Set());
   private readonly statusSig = signal<ExecutionStatus>('pending');
+  /** True only when the cursor's current position was reached by actually matching a breakpoint (see `landOn`). */
+  private readonly landedViaBreakpointSig = signal<boolean>(false);
 
   readonly events = this.eventsSig.asReadonly();
   readonly status = this.statusSig.asReadonly();
   readonly breakpoints = this.breakpointsSig.asReadonly();
   readonly isFollowingLive = this.followLiveSig.asReadonly();
+  readonly landedViaBreakpoint = this.landedViaBreakpointSig.asReadonly();
 
   readonly steps = computed<StepEvent[]>(() => this.eventsSig().filter(isStepEvent));
   readonly totalSteps = computed(() => this.steps().length);
@@ -101,11 +111,22 @@ export class TraceStoreService {
     this.statusSig.set(status);
   }
 
-  /** Append one event as it arrives (WebSocket frame). Advances the cursor only while following live. */
+  /**
+   * Append one event as it arrives (WebSocket frame). Advances the cursor
+   * only while following live — and if this step's line has a breakpoint,
+   * lands exactly on it (`landOn` turns following back off, since this
+   * step's index isn't the pseudo-end), so later events stop being
+   * auto-followed until the user re-arms it (see class doc).
+   */
   ingestEvent(event: ExecutionEvent): void {
     this.eventsSig.update((events) => [...events, event]);
     if (this.followLiveSig() && isStepEvent(event)) {
-      this.cursorSig.set(this.totalSteps());
+      if (this.breakpointsSig().has(event.line)) {
+        this.landOn(this.totalSteps() - 1, true);
+      } else {
+        this.cursorSig.set(this.totalSteps());
+        this.landedViaBreakpointSig.set(false);
+      }
     }
   }
 
@@ -121,6 +142,7 @@ export class TraceStoreService {
     this.cursorSig.set(-1);
     this.followLiveSig.set(true);
     this.statusSig.set('pending');
+    this.landedViaBreakpointSig.set(false);
   }
 
   /**
@@ -163,13 +185,20 @@ export class TraceStoreService {
     });
   }
 
-  /** Advances to the next step (after the current position) whose line has a breakpoint, or to the end. */
+  /**
+   * Advances to the next step (after the current position) whose line has a
+   * breakpoint, or to the end if none is hit — a breakpoint set on a line
+   * with no line-table entry (blank line, comment, a bare `}`) never
+   * matches any recorded step, so this silently falls through to the end.
+   * `landedViaBreakpoint` distinguishes the two outcomes for the UI: only
+   * an actual match marks the landing as a breakpoint hit.
+   */
   runToNextBreakpoint(): void {
     const steps = this.steps();
     const bps = this.breakpointsSig();
     for (let i = this.cursorSig() + 1; i < steps.length; i++) {
       if (bps.has(steps[i].line)) {
-        this.landOn(i);
+        this.landOn(i, true);
         return;
       }
     }
@@ -182,17 +211,18 @@ export class TraceStoreService {
     const bps = this.breakpointsSig();
     for (let i = this.cursorSig() - 1; i >= 0; i--) {
       if (bps.has(steps[i].line)) {
-        this.landOn(i);
+        this.landOn(i, true);
         return;
       }
     }
     this.jumpToStart();
   }
 
-  private landOn(index: number): void {
+  private landOn(index: number, viaBreakpoint = false): void {
     const total = this.totalSteps();
     const clamped = Math.max(-1, Math.min(index, total));
     this.cursorSig.set(clamped);
     this.followLiveSig.set(clamped === total);
+    this.landedViaBreakpointSig.set(viaBreakpoint);
   }
 }

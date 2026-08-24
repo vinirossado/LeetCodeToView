@@ -122,6 +122,7 @@ export class App {
   readonly terminalEvent = this.trace.terminalEvent;
   readonly outputSoFar = this.trace.outputSoFar;
   readonly breakpoints = this.trace.breakpoints;
+  readonly landedViaBreakpoint = this.trace.landedViaBreakpoint;
 
   readonly currentLine = computed(() => this.currentStep()?.line ?? null);
   readonly currentStack = computed(() => this.currentStep()?.stack ?? null);

@@ -42,17 +42,35 @@ public class ExecutionJob {
             runner.run(execution, line -> store.appendEvent(execution.getId(), parseEventOrStdout(line)));
             store.finish(execution.getId(), ExecutionStatus.COMPLETED);
         } catch (Exception e) {
-            // Never forward a raw exception message to the client as-is —
-            // it can come straight from sandbox-runner/dotnet/nsjail and
-            // leak host paths, panic locations, etc. See
-            // SandboxErrorSanitizer for what is/isn't safe to pass through.
-            String sanitized = SandboxErrorSanitizer.sanitize(e.getMessage(), "execution " + execution.getId(), e);
-            ObjectNode errorEvent = MAPPER.createObjectNode();
-            errorEvent.put("type", "error");
-            errorEvent.put("message", sanitized);
-            store.appendEvent(execution.getId(), errorEvent);
+            // sandbox-runner can itself emit a specific, already-clean
+            // `{"type":"error",...}` event on stdout BEFORE exiting
+            // non-zero (e.g. jdi/Debugger.java's/com.rs's multi-thread
+            // block: it prints a clear message and only then exits with a
+            // non-zero code, specifically so this catch block also runs
+            // and marks the execution FAILED). Appending a second, generic
+            // sanitized error on top in that case buries the useful
+            // message under a useless one — the last event is what the
+            // frontend actually displays (TraceStoreService.terminalEvent()).
+            // Only fall back to the generic sanitized message when nothing
+            // more specific was already emitted in-band.
+            if (!lastEventIsError(execution)) {
+                String sanitized = SandboxErrorSanitizer.sanitize(e.getMessage(), "execution " + execution.getId(), e);
+                ObjectNode errorEvent = MAPPER.createObjectNode();
+                errorEvent.put("type", "error");
+                errorEvent.put("message", sanitized);
+                store.appendEvent(execution.getId(), errorEvent);
+            }
             store.finish(execution.getId(), ExecutionStatus.FAILED);
         }
+    }
+
+    private static boolean lastEventIsError(Execution execution) {
+        var events = execution.getEvents();
+        if (events.isEmpty()) {
+            return false;
+        }
+        JsonNode last = events.get(events.size() - 1);
+        return last.isObject() && "error".equals(last.path("type").asText(null));
     }
 
     private static JsonNode parseEventOrStdout(String line) {

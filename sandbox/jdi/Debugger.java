@@ -51,6 +51,18 @@ public class Debugger {
         final StepRequest[] activeStepReq = {null};
         final boolean[] capped = {false};
 
+        // Multi-thread event model decision (spec.md "Multi-thread", pending
+        // since Fase 1): blocked in the MVP rather than modeling `stack` per
+        // thread. Detected at runtime, not statically at submission time —
+        // a static grep for `new Thread`/etc. would have real false
+        // positives (the string/comment case) and false negatives
+        // (reflection-based thread creation), so this instead watches for
+        // an actual second non-JVM-internal thread starting, matching how
+        // every other Fase 2 hardening signal in this file (OOM, stack
+        // overflow, timeout) was done — observed real runtime behavior,
+        // not a static guess.
+        final ThreadReference[] mainThread = {null};
+
         LaunchingConnector connector = Bootstrap.virtualMachineManager().defaultConnector();
         Map<String, Connector.Argument> arguments = connector.defaultArguments();
         arguments.get("main").setValue(mainClass);
@@ -66,6 +78,13 @@ public class Debugger {
         cpr.addClassFilter(mainClass);
         cpr.setSuspendPolicy(EventRequest.SUSPEND_ALL);
         cpr.enable();
+
+        // Must suspend (not just observe) on each thread start: the whole
+        // point is to stop a second real thread before it runs any of the
+        // user's code unobserved.
+        ThreadStartRequest tsr = erm.createThreadStartRequest();
+        tsr.setSuspendPolicy(EventRequest.SUSPEND_ALL);
+        tsr.enable();
 
         EventQueue queue = vm.eventQueue();
         boolean running = true;
@@ -84,7 +103,42 @@ public class Debugger {
                     BreakpointRequest bpReq = erm.createBreakpointRequest(firstLine);
                     bpReq.setSuspendPolicy(suspendPolicy);
                     bpReq.enable();
+                } else if (event instanceof ThreadStartEvent) {
+                    ThreadReference started = ((ThreadStartEvent) event).thread();
+                    // The target's main thread fires its own ThreadStartEvent
+                    // too, typically before the ClassPrepare/Breakpoint pair
+                    // above ever runs — mainThread[0] is still null at that
+                    // point, so it's naturally let through here (nothing to
+                    // compare against yet) and gets recorded as `mainThread`
+                    // once the BreakpointEvent below fires. JVM housekeeping
+                    // threads (Reference Handler, Finalizer, Signal
+                    // Dispatcher, Common-Cleaner, ...) are direct children of
+                    // the "system" ThreadGroup, never of "main" — confirmed
+                    // empirically (see tasks.md) rather than assumed from
+                    // general JDK knowledge, since this is JDK-version-
+                    // dependent territory.
+                    if (mainThread[0] != null && !started.equals(mainThread[0]) && !isSystemThread(started)) {
+                        System.out.println(
+                                "{\"type\":\"error\",\"message\":\"multi-thread execution is not supported yet (MVP scope)\"}");
+                        vm.exit(1);
+                        // System.exit (not just running=false + fall through
+                        // to a normal main() return) so THIS Debugger
+                        // process's own exit code is non-zero — matching
+                        // csharp.rs's run_worker, which returns 1 for the
+                        // same block. Consistency matters here: java.rs's
+                        // nsjail wrapper (events::run_nsjail) turns a
+                        // non-zero exit into ProcessSandboxRunner throwing,
+                        // which is what makes ExecutionJob mark the
+                        // execution FAILED instead of COMPLETED. Without
+                        // this, Debugger's own JVM would exit 0 normally
+                        // after the loop, and the trace would show the
+                        // right error EVENT but the wrong overall status.
+                        // (Unreachable past this point — System.exit halts
+                        // the JVM immediately, no need for `running = false`.)
+                        System.exit(1);
+                    }
                 } else if (event instanceof BreakpointEvent) {
+                    mainThread[0] = ((BreakpointEvent) event).thread();
                     StepRequest stepReq = erm.createStepRequest(
                             ((BreakpointEvent) event).thread(),
                             StepRequest.STEP_LINE, StepRequest.STEP_OVER);
@@ -299,6 +353,38 @@ public class Debugger {
             return sb.toString();
         }
         return "\"" + escapeJson(String.valueOf(val)) + "\"";
+    }
+
+    // Empirically confirmed inside this project's actual sandboxed JDK 17
+    // (`sandbox/Dockerfile`'s openjdk-17-jdk-headless), not assumed from
+    // general JDK knowledge: a genuinely single-threaded program (Loop.java)
+    // still starts "Notification Thread" (group "system") AND
+    // "Common-Cleaner" (group "InnocuousThreadGroup" — NOT "system", the
+    // first version of this check got that wrong and false-positived on
+    // every single-threaded program). Combining a group-name check with a
+    // small name allowlist as defense-in-depth for other well-known JVM
+    // housekeeping threads not observed in that one test program (older
+    // JDKs' "Reference Handler"/"Finalizer", "Signal Dispatcher",
+    // "Attach Listener" if a profiler attaches, "DestroyJavaVM" during
+    // shutdown). Best-effort, not exhaustively proven for every possible
+    // program — same tolerance this codebase already accepts for the
+    // OOM/stack-overflow heuristics elsewhere in this file.
+    private static final Set<String> KNOWN_JVM_THREAD_NAMES = Set.of(
+            "Reference Handler", "Finalizer", "Signal Dispatcher",
+            "Attach Listener", "DestroyJavaVM", "process reaper");
+
+    static boolean isSystemThread(ThreadReference thread) {
+        try {
+            if (KNOWN_JVM_THREAD_NAMES.contains(thread.name())) {
+                return true;
+            }
+            ThreadGroupReference group = thread.threadGroup();
+            return group == null
+                    || "system".equals(group.name())
+                    || "InnocuousThreadGroup".equals(group.name());
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     static String escapeJson(String s) {

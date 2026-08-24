@@ -41,6 +41,55 @@ pub static mut STEP_CAPPED: bool = false;
 // was found) means extract_locals keeps using positional `local_N` keys.
 pub static mut LOCAL_NAME_RESOLVER: Option<fn(u32, u32) -> BTreeMap<u32, String>> = None;
 
+// Multi-thread event model decision (spec.md "Multi-thread", pending since
+// Fase 1): blocked in the MVP, same choice made for Java (jdi/Debugger.java)
+// — detected at runtime instead of a static source-code guess. Tracks every
+// distinct ICorDebugThread pointer seen via CreateThread, in first-seen
+// order (the first is the debuggee's own main thread, confirmed empirically
+// against the real breakpoint's thread pointer).
+//
+// Unlike Java's JDI (which lets a ThreadGroup-name check cleanly tell real
+// user threads apart from JVM housekeeping threads), a real, genuinely
+// single-threaded C# program was empirically confirmed (see tasks.md) to
+// still fire CreateThread TWICE — main, plus one CoreCLR-internal managed
+// thread that appears right before ExitProcess, with no distinguishing
+// property found on the ICorDebugThread handle itself to filter it out by
+// kind. So the tolerance here is a plain count: up to 2 distinct threads
+// (main + that one baseline extra) is normal; a 3rd distinct thread is
+// treated as genuine user-created multi-thread code. Best-effort, not
+// proven for every possible single-threaded program — same "simple over
+// perfect" MVP tolerance already accepted for other heuristics in this
+// codebase (e.g. the LikelyOom exit-code inference). Also independently
+// justified by a second empirical finding: the existing worker does not
+// correctly handle real concurrent user threads at all today (a manual run
+// against a genuinely multi-threaded program hung to the full --time_limit
+// timeout instead of stepping through/completing) — blocking early is
+// strictly better than that silent hang, not just a matter of taste.
+//
+// KNOWN GAP, found empirically (repeated real runs against
+// test-snippets-csharp/MultiThreadCs through the full API/Docker stack,
+// not just a one-off): this detection is NOT fully reliable, unlike the
+// Java side. In roughly 2 of 5 repeated runs, the stepper itself got stuck
+// re-triggering StepComplete on the exact same IL offset inside
+// `Thread.Start()`'s own CoreCLR implementation (`StartCore`) — thousands
+// of identical step events, no forward progress — and this stall happens
+// BEFORE a 3rd distinct thread's CreateThread callback ever fires, so
+// SEEN_THREADS never crosses MAX_TOLERATED_THREADS and this block never
+// triggers. This is a separate, deeper problem with single-stepping
+// through OS-level thread-creation internals, not a bug in the counting
+// logic here (confirmed: when CreateThread for the 3rd thread DOES fire
+// before the stepper gets stuck, the block works correctly and quickly,
+// ~0.2s). Net effect: this mitigation catches the common case and is
+// strictly no worse than doing nothing (nsjail's own --time_limit still
+// eventually kills the stuck case exactly as before this existed,
+// producing a `timeout` event instead of a `stack_overflow`-would-be-
+// clean-message one) — but does not guarantee a clean, fast block for
+// every real multi-threaded C# program the way jdi/Debugger.java's
+// equivalent does for Java. Investigating/fixing the stepper stall itself
+// is out of scope here (see tasks.md).
+pub static mut SEEN_THREADS: Vec<*mut c_void> = Vec::new();
+const MAX_TOLERATED_THREADS: usize = 2;
+
 unsafe fn report_error(message: String) {
     FATAL_ERROR = true;
     if let Some(sink) = ERROR_SINK {
@@ -171,7 +220,27 @@ pub struct ControllerVtbl {
 
 /// Chama Continue() num ICorDebugProcess ou ICorDebugAppDomain (ambos
 /// herdam de ICorDebugController, Continue está na mesma posição de vtable).
+///
+/// Real bug found by actually running the new multi-thread block against
+/// the real 8-thread test snippet through the full API/Docker stack (not
+/// just a manual, lower-concurrency exploratory run): `ICorDebug::Continue`
+/// resumes the WHOLE debuggee process, not just the one callback/thread
+/// that received it. During a busy startup burst — several LoadModule/
+/// LoadAssembly callbacks firing close together with the CreateThread
+/// callbacks that detect and block — cb_create_thread correctly skipped
+/// ITS OWN Continue() call once the threshold was crossed, but every OTHER
+/// callback in that same burst kept calling this function unconditionally
+/// and resumed the process anyway, undoing the block. Intermittent,
+/// confirmed by repeated real runs: sometimes the block's CreateThread
+/// callback happened to be the last one in a burst (worked), sometimes it
+/// wasn't (didn't — the debuggee kept running until nsjail's own
+/// `--time_limit` eventually killed it). Fixed at the single choke point
+/// every callback already goes through, instead of adding a check to each
+/// of the ~15 callback functions individually.
 pub unsafe fn continue_(controller: *mut c_void) -> HResult {
+    if FATAL_ERROR {
+        return S_OK;
+    }
     let vtbl = *(controller as *const *const ControllerVtbl);
     ((*vtbl).continue_)(controller, 0) // fIsOutOfBand = FALSE
 }
@@ -1088,12 +1157,34 @@ unsafe extern "C" fn cb_exit_process(_this: *mut c_void, process: *mut c_void) -
     S_OK
 }
 
+// static_mut_refs: same single-threaded-reentrant-callback safety model as
+// every other `static mut` in this file (see module doc comment at the
+// top) — a Vec just needs a real reference to call .contains()/.push()/
+// .len() on, unlike the plain bool/u32/Option<fn> statics elsewhere here
+// that the compiler accepts via bare value copies.
+#[allow(static_mut_refs)]
 unsafe extern "C" fn cb_create_thread(
     _this: *mut c_void,
     ad: *mut c_void,
     thread: *mut c_void,
 ) -> HResult {
     eprintln!("[callback] CreateThread! thread={:?}", thread);
+
+    if !SEEN_THREADS.contains(&thread) {
+        SEEN_THREADS.push(thread);
+    }
+    if SEEN_THREADS.len() > MAX_TOLERATED_THREADS {
+        eprintln!("[callback]   multi-thread detectado ({} threads distintas) — bloqueando (MVP scope)", SEEN_THREADS.len());
+        report_error("multi-thread execution is not supported yet (MVP scope)".to_string());
+        // Do not Continue() the app domain — the debuggee stays suspended
+        // (this callback fired with SUSPEND_ALL-equivalent semantics, same
+        // as every other callback here) rather than being allowed to run
+        // the new thread's code. run_worker's poll loop picks up
+        // FATAL_ERROR and returns promptly instead of waiting on
+        // PROCESS_EXITED, which would never come on its own from here.
+        return S_OK;
+    }
+
     let hr = continue_(ad);
     eprintln!("[callback]   Continue() no app_domain -> hr=0x{:08x}", hr as u32);
     S_OK

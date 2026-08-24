@@ -66,6 +66,20 @@ describe('TraceStoreService', () => {
       expect(store.currentStep()?.line).toBe(3);
     });
 
+    it('stops following live at the first incoming step whose line has a breakpoint, instead of racing to the tip', () => {
+      store.toggleBreakpoint(5);
+      store.ingestEvent(step(1));
+      store.ingestEvent(step(5)); // hits the breakpoint mid-stream
+
+      expect(store.currentStep()?.line).toBe(5);
+      expect(store.landedViaBreakpoint()).toBe(true);
+      expect(store.isFollowingLive()).toBe(false);
+
+      // Further live events must not be auto-followed past the stop.
+      store.ingestEvent(step(9));
+      expect(store.currentStep()?.line).toBe(5);
+    });
+
     it('does not move the step cursor for non-step events (e.g. stdout)', () => {
       store.ingestEvent(step(1));
       store.ingestEvent({ type: 'stdout', text: 'ola' });
@@ -167,6 +181,35 @@ describe('TraceStoreService', () => {
       store.jumpToEnd();
       store.runToPreviousBreakpoint();
       expect(store.currentStep()?.line).toBe(2);
+    });
+
+    describe('landedViaBreakpoint (drives the red "actually stopped here" decoration)', () => {
+      it('is true only when runToNextBreakpoint/runToPreviousBreakpoint actually match a step', () => {
+        store.toggleBreakpoint(5);
+        store.runToNextBreakpoint();
+        expect(store.landedViaBreakpoint()).toBe(true);
+      });
+
+      it('is false when no breakpoint is hit and it falls through to the end', () => {
+        store.toggleBreakpoint(9);
+        store.goToStep(4); // already at the only line-9 step — nothing further to match
+        store.runToNextBreakpoint();
+        expect(store.landedViaBreakpoint()).toBe(false);
+      });
+
+      it('is cleared by any other navigation (step, jump, live ingest)', () => {
+        store.toggleBreakpoint(5);
+        store.runToNextBreakpoint();
+        expect(store.landedViaBreakpoint()).toBe(true);
+
+        store.stepForward();
+        expect(store.landedViaBreakpoint()).toBe(false);
+
+        store.runToNextBreakpoint();
+        expect(store.landedViaBreakpoint()).toBe(true);
+        store.jumpToStart();
+        expect(store.landedViaBreakpoint()).toBe(false);
+      });
     });
   });
 

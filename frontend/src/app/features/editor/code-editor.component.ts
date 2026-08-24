@@ -40,6 +40,8 @@ export class CodeEditorComponent implements AfterViewInit, OnDestroy {
   readonly language = input.required<Language>();
   readonly value = input<string>('');
   readonly currentLine = input<number | null>(null);
+  /** True when `currentLine` was reached by actually matching a breakpoint (vs. stepping/jumping there normally). */
+  readonly stoppedAtBreakpoint = input<boolean>(false);
   readonly breakpoints = input<ReadonlySet<number>>(new Set());
   readonly readOnly = input<boolean>(false);
 
@@ -62,7 +64,8 @@ export class CodeEditorComponent implements AfterViewInit, OnDestroy {
 
     effect(() => {
       const line = this.currentLine();
-      this.applyCurrentLineDecoration(line);
+      const stoppedAtBreakpoint = this.stoppedAtBreakpoint();
+      this.applyCurrentLineDecoration(line, stoppedAtBreakpoint);
     });
 
     effect(() => {
@@ -115,7 +118,7 @@ export class CodeEditorComponent implements AfterViewInit, OnDestroy {
     this.editorInstance?.dispose();
   }
 
-  private applyCurrentLineDecoration(line: number | null): void {
+  private applyCurrentLineDecoration(line: number | null, stoppedAtBreakpoint: boolean): void {
     if (!this.editorInstance) return;
     const decorations: monaco.editor.IModelDeltaDecoration[] =
       line === null
@@ -125,8 +128,10 @@ export class CodeEditorComponent implements AfterViewInit, OnDestroy {
               range: new monaco.Range(line, 1, line, 1),
               options: {
                 isWholeLine: true,
-                className: 'current-line-highlight',
-                glyphMarginClassName: 'current-line-glyph',
+                className: stoppedAtBreakpoint ? 'current-line-breakpoint-hit' : 'current-line-highlight',
+                glyphMarginClassName: stoppedAtBreakpoint
+                  ? 'current-line-breakpoint-hit-glyph'
+                  : 'current-line-glyph',
               },
             },
           ];
