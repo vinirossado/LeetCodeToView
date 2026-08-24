@@ -47,7 +47,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg \
     ca-certificates \
-    openjdk-17-jdk-headless \
     maven \
     unzip \
     && rm -rf /var/lib/apt/lists/*
@@ -55,11 +54,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# JDK 25 for building/running the Quarkus API itself — kept separate from
-# the JDK 17 above (java.rs/jdi hardcode JDK 17 for the SANDBOXED user-code
-# path). Install dir is architecture-suffixed (temurin-25-jdk-amd64 vs
-# -arm64); symlinked to a stable path instead of hardcoding an arch (same
-# fix as Dockerfile.api, found empirically building on an arm64 host).
+# JDK 25, used for BOTH building/running the Quarkus API AND (via
+# update-alternatives, `/usr/bin/java`/`/usr/bin/javac`) running sandboxed
+# user code — see Dockerfile.api's identical, longer comment for why this
+# is now a single JDK instead of two: an `openjdk-17-jdk-headless` install
+# used to sit here too, on the mistaken assumption the sandboxed path
+# needed to "stay JDK 17", but `update-alternatives`'s default
+# highest-version-wins behavior meant `/usr/bin/java` silently resolved to
+# this JDK 25 install regardless — found empirically, not assumed. Removed
+# rather than fixed to actually enforce JDK 17, since everything already
+# works correctly under JDK 25. Install dir is architecture-suffixed
+# (temurin-25-jdk-amd64 vs -arm64); symlinked to a stable path instead of
+# hardcoding an arch (found empirically building on an arm64 host).
 RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" > /etc/apt/sources.list.d/adoptium.list \
     && apt-get update && apt-get install -y --no-install-recommends temurin-25-jdk \
@@ -110,7 +116,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
-    openjdk-17-jdk-headless \
     # libicu72: the .NET SDK's own CLI/MSBuild (not just user C# code)
     # needs ICU for globalization unless invariant mode is forced — without
     # it `dotnet build` can fail outright with "Couldn't find a valid ICU
@@ -137,9 +142,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # delegation even for real root.
 RUN echo "root:65534:1" > /etc/subuid && echo "root:65534:1" > /etc/subgid
 
-# JDK 25 to run the Quarkus API jar itself (same package/symlink approach
-# as the build stage — this is a separate apt install because this is a
-# separate, non-toolchain base image).
+# JDK 25 — runs the Quarkus API jar itself AND (via update-alternatives,
+# `/usr/bin/java`/`javac`) sandboxed user code; see the toolchain stage's
+# identical comment above for why this is one JDK, not the originally
+# planned two. Same package/symlink approach as the build stage — this is
+# a separate apt install because this is a separate, non-toolchain base
+# image.
 RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" > /etc/apt/sources.list.d/adoptium.list \
     && apt-get update && apt-get install -y --no-install-recommends temurin-25-jdk \

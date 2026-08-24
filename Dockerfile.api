@@ -25,7 +25,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg \
     ca-certificates \
-    openjdk-17-jdk-headless \
     libicu-dev \
     python3 \
     maven \
@@ -80,13 +79,32 @@ RUN git clone --depth 1 https://github.com/google/nsjail.git /tmp/nsjail \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# JDK 25 for running the Quarkus API itself, kept separate from the JDK 17
-# above: java.rs hardcodes `/usr/bin/java` for the SANDBOXED user code path
-# (via update-alternatives from openjdk-17-jdk-headless), and that must stay
-# JDK 17 — it's what jdi/Debugger.java was validated against all session.
+# JDK 25, used for BOTH the Quarkus API itself AND running sandboxed user
+# code (java.rs hardcodes `/usr/bin/java` for the latter). Originally the
+# plan was two separate JDKs — this one for Quarkus, an `openjdk-17-jdk-
+# headless` install for the sandboxed path, on the assumption jdi/Debugger.
+# java needed to "stay JDK 17". That never actually held: `openjdk-17-jdk-
+# headless` was installed BEFORE this package in the same apt layer, and
+# `update-alternatives` picks the higher-priority (i.e. newer-version)
+# package by default — so `/usr/bin/java`/`/usr/bin/javac` silently
+# resolved to this JDK 25 install all along, not JDK 17. Found empirically
+# (`readlink -f /usr/bin/java` inside a running container, not assumed).
+# Some JDI findings in tasks.md (e.g. the InnocuousThreadGroup multi-thread
+# false-positive) cite validation against the standalone `sandbox/Dockerfile`
+# spike image, which genuinely IS JDK 17 (no competing install there) — but
+# the fix has ALSO been continuously exercised against this combined image's
+# real JDK 25 the whole time (the E2E suite's multi-thread test runs against
+# docker-compose, i.e. this image), so it's confirmed correct under both,
+# not misattributed. Since everything already works correctly under JDK 25,
+# the openjdk-17 install here was removed instead of forcing JDK 17 to match
+# stale intent — one JDK for this image, nothing to keep in sync.
 # Quarkus is launched with an explicit JAVA_HOME instead of touching PATH.
 # Installed via Eclipse Temurin's own apt repo (verified reachable), not a
-# guessed tarball URL.
+# guessed tarball URL. NOTE: `maven` (installed above) transitively pulls in
+# `openjdk-17-jre-headless` as a dependency — confirmed harmless via
+# `update-alternatives --display java`: it registers at a lower priority
+# (1711) than this JDK 25 install (2511), so `/usr/bin/java` still resolves
+# here in "auto mode", and being JRE-only it never provides `javac` at all.
 # The install dir is architecture-suffixed (temurin-25-jdk-amd64 vs
 # -arm64) and differs depending on the build host/platform — symlinked to
 # a stable, arch-independent path instead of hardcoding one arch (found by

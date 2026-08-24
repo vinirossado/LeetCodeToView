@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -70,8 +71,13 @@ public class Debugger {
 
         VirtualMachine vm = connector.launch(arguments);
 
-        redirectStream(vm.process().getInputStream(), System.out);
-        redirectStream(vm.process().getErrorStream(), System.err);
+        redirectStream(vm.process().getInputStream(), System.out, null);
+        // Captured (not just relayed) so an uncaught exception's message/
+        // stack trace can be surfaced as a clean error event below instead
+        // of silently vanishing into this driver's own stderr (invisible
+        // to the API/user — see the exitValue check after the event loop).
+        List<String> targetStderr = new ArrayList<>();
+        Thread stderrRedirect = redirectStream(vm.process().getErrorStream(), System.err, targetStderr);
 
         EventRequestManager erm = vm.eventRequestManager();
         ClassPrepareRequest cpr = erm.createClassPrepareRequest();
@@ -211,10 +217,76 @@ public class Debugger {
         // hardcoded to a fixed 10s before, an avoidable source of exactly
         // this ambiguity), but the two mechanisms remain distinct so a false
         // positive is still possible in principle.
+        // Join before reading targetStderr: the redirect thread may still be
+        // draining the last buffered lines right as the process exits (the
+        // stream doesn't necessarily close in the same instant VMDeathEvent
+        // fires) — without this, the captured list below could be read
+        // mid-write, silently missing the exception's last line(s).
         try {
+            stderrRedirect.join(2000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        // Both branches below need to end the DRIVER's own process with a
+        // non-zero exit code, not just print the right JSON — found
+        // empirically testing the new branch: ProcessSandboxRunner (API
+        // side) only inspects sandbox-runner's exit code to decide
+        // completed vs. failed, never the JSON event content itself (that
+        // only gets checked inside ExecutionJob's catch block, i.e. only
+        // once an exception has already been thrown). Printing a correct
+        // `{"type":"error",...}`/`{"type":"memory_limit_exceeded"}` line
+        // while the driver still exits 0 is exactly the multi-thread bug
+        // already fixed elsewhere in this file (`System.exit(1)` after the
+        // block event) — same fix needed here, just not previously applied
+        // to either of these two branches.
+        boolean sawAbnormalTargetExit = false;
+        try {
+            // Real race found empirically while testing this exact check
+            // (not present before, since the pre-existing 137/OOM case
+            // apparently never hit it in practice — likely because a
+            // SIGKILL reaps faster than a JVM's own exception-driven exit,
+            // which does shutdown-hook/cleanup work first): `VMDeathEvent`
+            // firing does NOT guarantee `vm.process().exitValue()` won't
+            // still throw `IllegalThreadStateException` — the OS process
+            // can still be a beat away from being reaped. A bare
+            // `exitValue()` call right after the event loop reproduced
+            // this consistently for an uncaught-exception exit (which
+            // does more JVM-side work before actually exiting than a raw
+            // SIGKILL does) — confirmed by adding a temporary debug print
+            // that silently never ran, meaning the IllegalThreadStateException
+            // branch below was firing every time. Fixed with a bounded
+            // wait first.
+            vm.process().waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
             int exitValue = vm.process().exitValue();
             if (exitValue == 137) {
                 System.out.println("{\"type\":\"memory_limit_exceeded\"}");
+                sawAbnormalTargetExit = true;
+            } else if (exitValue != 0) {
+                // Genuinely new failure class found empirically (not the
+                // OOM/timeout ones above): an uncaught exception in user
+                // code (or the user's own `System.exit(N)`) makes the
+                // TARGET exit non-zero — conventionally 1 for an uncaught
+                // exception — but nothing checked for that before this,
+                // so the driver fell through to its own normal exit 0 and
+                // the API reported `status: "completed"` with a silently
+                // truncated trace, no matter how the program actually
+                // failed. Confirmed via POST /executions against the real
+                // API: an uncaught ArrayIndexOutOfBoundsException produced
+                // exactly that — 1 step, the pre-crash stdout, then
+                // nothing. Fixed by surfacing the target's own captured
+                // stderr (the actual exception message/stack trace, or
+                // whatever it printed before an explicit exit) as a clean
+                // error event — this is the user's own program's output,
+                // not internal sandbox detail, so unlike
+                // SandboxErrorSanitizer's genericization it's safe and
+                // useful to show verbatim.
+                String detail = String.join("\n", targetStderr);
+                String message = detail.isEmpty()
+                        ? "program exited with code " + exitValue
+                        : detail;
+                System.out.println("{\"type\":\"error\",\"message\":\"" + escapeJson(message) + "\"}");
+                sawAbnormalTargetExit = true;
             }
         } catch (IllegalThreadStateException e) {
             // Process hasn't actually exited yet — shouldn't happen once
@@ -228,6 +300,17 @@ public class Debugger {
                 skipData, sampleN, eventCount[0], emittedCount[0], elapsedMs,
                 eventCount[0] * 1000.0 / Math.max(elapsedMs, 1),
                 emittedCount[0] * 1000.0 / Math.max(elapsedMs, 1)));
+
+        if (sawAbnormalTargetExit) {
+            // Same reasoning as the multi-thread block's System.exit(1)
+            // above: ProcessSandboxRunner/ExecutionJob (API side) only
+            // decide completed-vs-failed from THIS process's own exit
+            // code, never from the JSON events themselves unless an
+            // exception was already thrown — so printing the right event
+            // above isn't enough on its own, this process must also exit
+            // non-zero for the API to actually mark the execution FAILED.
+            System.exit(1);
+        }
     }
 
     static void emitStepEvent(LocatableEvent event, long t0) {
@@ -355,9 +438,10 @@ public class Debugger {
         return "\"" + escapeJson(String.valueOf(val)) + "\"";
     }
 
-    // Empirically confirmed inside this project's actual sandboxed JDK 17
-    // (`sandbox/Dockerfile`'s openjdk-17-jdk-headless), not assumed from
-    // general JDK knowledge: a genuinely single-threaded program (Loop.java)
+    // Empirically confirmed inside this project's actual sandboxed JDK
+    // (`sandbox/Dockerfile`'s openjdk-17-jdk-headless — the standalone
+    // spike image), not assumed from general JDK knowledge: a genuinely
+    // single-threaded program (Loop.java)
     // still starts "Notification Thread" (group "system") AND
     // "Common-Cleaner" (group "InnocuousThreadGroup" — NOT "system", the
     // first version of this check got that wrong and false-positived on
@@ -369,6 +453,15 @@ public class Debugger {
     // shutdown). Best-effort, not exhaustively proven for every possible
     // program — same tolerance this codebase already accepts for the
     // OOM/stack-overflow heuristics elsewhere in this file.
+    //
+    // NOTE on the discrepancy between this JDK 17 test environment and
+    // production/docker-compose: the combined API image (Dockerfile.api,
+    // .ci/Dockerfile) was found to actually run sandboxed code on JDK 25,
+    // not JDK 17 as its comments used to (incorrectly) claim — see
+    // Dockerfile.api's comment on the JDK install. This group-name/allowlist
+    // check is still confirmed working there too, not just here: the E2E
+    // suite's "blocks Java code that spawns a real thread" test runs
+    // against that exact image (docker-compose) and passes consistently.
     private static final Set<String> KNOWN_JVM_THREAD_NAMES = Set.of(
             "Reference Handler", "Finalizer", "Signal Dispatcher",
             "Attach Listener", "DestroyJavaVM", "process reaper");
@@ -387,16 +480,62 @@ public class Debugger {
         }
     }
 
+    /**
+     * Real bug found and fixed while adding the uncaught-exception error
+     * event below: a Java stack trace's continuation lines start with a
+     * literal TAB character ({@code \tat Main.main(...)}), which this
+     * method used to pass through unescaped. A raw control character
+     * (anything below U+0020) inside a JSON string is invalid per the spec
+     * (RFC 8259) — Jackson's {@code ObjectMapper.readTree} (the API side,
+     * {@code ExecutionJob.parseEventOrStdout}) correctly rejects it, so the
+     * whole intended error event silently fell through to being wrapped as
+     * a raw stdout-text event instead of being recognized as {@code
+     * "type":"error"} — confirmed via a real POST /executions with an
+     * uncaught exception, not assumed. Escapes every control character
+     * generically (not just the two JSON has short escapes for, {@code \n}/
+     * {@code \t}) so this can't recur for any other stack-trace/toString()
+     * content this method is used for elsewhere in this file.
+     */
     static String escapeJson(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"' -> sb.append("\\\"");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.toString();
     }
 
-    static void redirectStream(InputStream in, PrintStream out) {
+    /**
+     * Relays {@code in} to {@code out} line by line, as before. {@code capture},
+     * when non-null, ALSO appends every line to that list (in addition to the
+     * relay) — used for the target's stderr so its content is still available
+     * for inspection after the process exits, not just visible live on this
+     * driver's own stderr (which the API/frontend never see). Returns the
+     * relay thread so callers needing the capture can {@link Thread#join()} it
+     * first, to avoid reading a partially-drained list.
+     */
+    static Thread redirectStream(InputStream in, PrintStream out, List<String> capture) {
         Thread t = new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(in))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     out.println(line);
+                    if (capture != null) {
+                        capture.add(line);
+                    }
                 }
             } catch (IOException e) {
                 // stream fechado quando o processo debuggee termina
@@ -404,5 +543,6 @@ public class Debugger {
         });
         t.setDaemon(true);
         t.start();
+        return t;
     }
 }

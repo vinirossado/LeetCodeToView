@@ -1,17 +1,10 @@
-import { expect, test } from '@playwright/test';
-import { replaceEditorContent } from './support/monaco';
-
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.clear());
-});
+import { expect, test } from './support/fixtures';
 
 test('runs the Java starter example end to end: leaves "Executando…" and shows the program output', async ({
-  page,
+  codePage,
 }) => {
-  await page.goto('/');
-
-  const runButton = page.getByRole('button', { name: /Run|Executando/ });
-  await runButton.click();
+  await codePage.goto();
+  await codePage.run();
 
   // Regression coverage for two real bugs found this session, both of which
   // manifested as the button staying on "Executando…" forever:
@@ -23,20 +16,18 @@ test('runs the Java starter example end to end: leaves "Executando…" and shows
   //     error handler never moved status off 'pending'.
   // This assertion is the actual product requirement: the button MUST
   // eventually read "Run" again, not get stuck.
-  await expect(runButton).toHaveText('Run', { timeout: 20_000 });
+  await codePage.waitForRunToFinish();
 
-  const executionId = page.locator('.execution-id');
-  await expect(executionId).toContainText('execution_id:');
+  await expect(codePage.executionId).toContainText('execution_id:');
 
   // The starter example prints a running total once per loop iteration
   // (n = 5), so stdout is "0", "1", "3", "6", "10" on separate lines (see
   // app.ts STARTER_CODE.java).
-  await page.getByRole('tab', { name: 'Saída' }).click();
-  const output = page.locator('pre');
-  await expect(output).toContainText('0');
+  await codePage.openTab('Saída');
+  await expect(codePage.output).toContainText('0');
 });
 
-test('renders each stdout line on its own line instead of running them together', async ({ page }) => {
+test('renders each stdout line on its own line instead of running them together', async ({ codePage }) => {
   // Regression test: outputSoFar() (trace-store.service.ts) used to join
   // stdout events with '' instead of '\n'. The API wraps sandbox-runner's
   // stdout one line at a time via BufferedReader.readLine() (ExecutionJob.
@@ -48,21 +39,17 @@ test('renders each stdout line on its own line instead of running them together'
   // lines concatenated back-to-back, followed by the program's real
   // "0","1","3","6","10" output squashed into a single unreadable
   // "013610".
-  await page.goto('/');
+  await codePage.goto();
+  await codePage.runAndWaitForFinish();
 
-  const runButton = page.getByRole('button', { name: /Run|Executando/ });
-  await runButton.click();
-  await expect(runButton).toHaveText('Run', { timeout: 20_000 });
-
-  await page.getByRole('tab', { name: 'Saída' }).click();
-  const output = page.locator('pre');
+  await codePage.openTab('Saída');
   // The button reads "Run" as soon as the execution's terminal status
   // lands, which can be a beat ahead of the trailing stdout event(s) for
   // the final loop iteration reaching the DOM — wait for the last expected
   // line rather than snapshotting text right away, to avoid a race with
   // that in-flight render.
-  await expect(output).toContainText('10');
-  const outputText = await output.innerText();
+  await expect(codePage.output).toContainText('10');
+  const outputText = await codePage.output.innerText();
 
   expect(outputText).not.toContain('013610');
   expect(outputText.split('\n').map((line) => line.trim())).toEqual(
@@ -70,7 +57,7 @@ test('renders each stdout line on its own line instead of running them together'
   );
 });
 
-test('does not leak the JVM\'s own container-detection warnings into the stdout panel', async ({ page }) => {
+test('does not leak the JVM\'s own container-detection warnings into the stdout panel', async ({ codePage }) => {
   // Regression test for a second, separate bug: nsjail's cgroup-per-jail
   // setup (a 'NSJAIL.<pid>' cgroup path instead of a normal container path)
   // makes the JVM print "[warning][os,container] Cgroup ... controller
@@ -83,51 +70,44 @@ test('does not leak the JVM\'s own container-detection warnings into the stdout 
   // in java.rs (the heap/metaspace limits are already pinned explicitly
   // via -Xmx/-XX:MaxMetaspaceSize, not cgroup-autodetected, so silencing
   // this log tag has no behavioral effect).
-  await page.goto('/');
+  await codePage.goto();
+  await codePage.runAndWaitForFinish();
 
-  const runButton = page.getByRole('button', { name: /Run|Executando/ });
-  await runButton.click();
-  await expect(runButton).toHaveText('Run', { timeout: 20_000 });
-
-  await page.getByRole('tab', { name: 'Saída' }).click();
-  const output = page.locator('pre');
-  await expect(output).toContainText('10');
-  const outputText = await output.innerText();
+  await codePage.openTab('Saída');
+  await expect(codePage.output).toContainText('10');
+  const outputText = await codePage.output.innerText();
 
   expect(outputText).not.toContain('Cgroup');
   expect(outputText).not.toContain('os,container');
   expect(outputText.split('\n').map((line) => line.trim())).toEqual(['0', '1', '3', '6', '10']);
 });
 
-test('runs the C# starter example end to end and shows the known local_N/PDB disclaimer', async ({ page }) => {
-  await page.goto('/');
-
-  await page.locator('.lang-select').selectOption('csharp');
+test('runs the C# starter example end to end and shows the known local_N/PDB disclaimer', async ({ codePage }) => {
+  await codePage.goto();
+  await codePage.selectLanguage('csharp');
 
   // Switching language swaps in that language's starter example (app.ts
   // onLanguageChange) and shows the C#-specific disclaimer about the
   // locals/line asymmetry (no PDB reading yet — see spec.md).
-  await expect(page.locator('.csharp-note')).toContainText('local_N');
+  await expect(codePage.csharpNote).toContainText('local_N');
 
-  const runButton = page.getByRole('button', { name: /Run|Executando/ });
-  await runButton.click();
-  await expect(runButton).toHaveText('Run', { timeout: 20_000 });
+  await codePage.runAndWaitForFinish();
 
   // Following-live navigation lands the cursor at the trace's pseudo-end
   // position after the run finishes, which can legitimately have no locals
   // in scope (e.g. right after the loop's closing brace) — jump back to the
   // very first step, which is inside the loop body and always has locals.
-  await page.getByTitle('Ir para o início').click();
-  await page.getByTitle('Próximo passo').click();
+  await codePage.goToStart();
+  await codePage.stepForward();
 
-  await page.getByRole('tab', { name: 'Variáveis' }).click();
+  await codePage.openTab('Variáveis');
   // C# locals render as positional local_0/local_1/... placeholders, not
   // real variable names — this is the documented, intentional asymmetry.
-  await expect(page.locator('dl')).toContainText('local_');
+  await expect(codePage.variables).toContainText('local_');
 });
 
 test('shows a clear error instead of getting stuck when a stale execution_id no longer exists server-side', async ({
-  page,
+  codePage,
 }) => {
   // Regression test for the third "Executando…" bug found this session:
   // the app auto-loads whatever execution_id is in localStorage on boot
@@ -135,26 +115,22 @@ test('shows a clear error instead of getting stuck when a stale execution_id no 
   // only, any execution_id surviving a container recreation points at
   // nothing — GET /trace 404s, and the fix (ExecutionSessionService.load's
   // error handler) must move status to 'failed', not leave it 'pending'.
-  await page.addInitScript(() => {
-    localStorage.setItem('code2complexity.lastExecutionId', 'this-id-does-not-exist-anymore');
-  });
+  await codePage.setStoredExecutionId('this-id-does-not-exist-anymore');
+  await codePage.goto();
 
-  await page.goto('/');
-
-  const runButton = page.getByRole('button', { name: /Run|Executando/ });
-  await expect(runButton).toHaveText('Run', { timeout: 10_000 });
-  await expect(page.locator('.error')).toContainText('execution not found');
+  await expect(codePage.runButton).toHaveText('Run', { timeout: 10_000 });
+  await expect(codePage.errorMessage).toContainText('execution not found');
 });
 
 test('rejects Java code without a class named Main with a clear inline error, not a silent hang', async ({
-  page,
+  codePage,
 }) => {
-  await page.goto('/');
+  await codePage.goto();
 
-  // The Monaco editor's content is what gets submitted — select all and
-  // replace with code missing the required `class Main` (see
-  // ExecutionsResource's server-side validation, api/src/main/java/.../web/ExecutionsResource.java).
-  // Uses replaceEditorContent (support/monaco.ts) rather than a raw
+  // The Monaco editor's content is what gets submitted — replace with code
+  // missing the required `class Main` (see ExecutionsResource's
+  // server-side validation, api/src/main/java/.../web/ExecutionsResource.java).
+  // Uses replaceCode (CodeEditorPage → support/monaco.ts) rather than a raw
   // click+press+type sequence: two separate, empirically-confirmed races
   // in the naive version made this flaky (see that helper's doc comment).
   // Notably, this test's own assertion happened to still pass even while
@@ -162,25 +138,24 @@ test('rejects Java code without a class named Main with a clear inline error, no
   // in the compiler error's location prefix satisfies
   // `.toContainText('Main')` regardless of the actual submitted code) —
   // so it was testing the wrong thing until this was found and fixed.
-  await replaceEditorContent(page, 'class Solution { void run() {} }');
+  await codePage.replaceCode('class Solution { void run() {} }');
+  await codePage.run();
 
-  await page.getByRole('button', { name: 'Run' }).click();
-
-  await expect(page.locator('.error')).toContainText('Main', { timeout: 10_000 });
+  await expect(codePage.errorMessage).toContainText('Main', { timeout: 10_000 });
 });
 
-test('switches between all five panel tabs', async ({ page }) => {
-  await page.goto('/');
+test('switches between all five panel tabs', async ({ codePage }) => {
+  await codePage.goto();
 
   const tabs = ['Variáveis', 'Call Stack', 'Saída', 'Complexidade', 'Timeline'];
   for (const tab of tabs) {
-    await page.getByRole('tab', { name: tab }).click();
-    await expect(page.getByRole('tab', { name: tab })).toHaveAttribute('aria-selected', 'true');
+    await codePage.openTab(tab);
+    await expect(codePage.tab(tab)).toHaveAttribute('aria-selected', 'true');
   }
 });
 
 test('blocks Java code that spawns a real thread, with a clear message instead of a silent hang or a false completion', async ({
-  page,
+  codePage,
 }) => {
   // Regression coverage for the multi-thread event model decision
   // (spec.md "Multi-thread", pending since Fase 1): blocked in the MVP.
@@ -193,29 +168,61 @@ test('blocks Java code that spawns a real thread, with a clear message instead o
   // `Thread.Start()`'s own internals sometimes prevents the detection from
   // ever firing, documented in tasks.md/com.rs) and a flaky E2E test would
   // be worse than no test at all.
-  await page.goto('/');
+  await codePage.goto();
 
-  // Uses replaceEditorContent (support/monaco.ts): a peer session flagged
-  // this test failing deterministically with a javac syntax error instead
-  // of exercising the JDI multi-thread check at all. Root-caused (not
-  // assumed) with a throwaway debug test dumping `.view-line` contents
-  // after the old raw click+press+type sequence: `type`'s per-keystroke
-  // handling of this brace/paren/quote-heavy one-liner desynced from the
-  // selection, silently leaving 9 stale lines of the starter example below
-  // the typed text — so the submitted "file" never compiled. See the
-  // helper's doc comment for the second, independent select-all race also
-  // found and fixed in the same pass.
-  await replaceEditorContent(
-    page,
+  // Uses replaceCode (CodeEditorPage → support/monaco.ts): a peer session
+  // flagged this test failing deterministically with a javac syntax error
+  // instead of exercising the JDI multi-thread check at all. Root-caused
+  // (not assumed) with a throwaway debug test dumping `.view-line`
+  // contents after the old raw click+press+type sequence: `type`'s
+  // per-keystroke handling of this brace/paren/quote-heavy one-liner
+  // desynced from the selection, silently leaving 9 stale lines of the
+  // starter example below the typed text — so the submitted "file" never
+  // compiled. See the helper's doc comment for the second, independent
+  // select-all race also found and fixed in the same pass.
+  await codePage.replaceCode(
     'class Main { public static void main(String[] a) throws InterruptedException { ' +
       'Thread t = new Thread(() -> System.out.println("hi")); t.start(); t.join(); } }',
   );
 
-  const runButton = page.getByRole('button', { name: /Run|Executando/ });
-  await runButton.click();
-  await expect(runButton).toHaveText('Run', { timeout: 20_000 });
+  await codePage.runAndWaitForFinish();
 
-  await expect(page.locator('.banner')).toContainText('multi-thread execution is not supported yet', {
+  await expect(codePage.banner).toContainText('multi-thread execution is not supported yet', {
+    timeout: 10_000,
+  });
+});
+
+test('shows the real exception instead of silently reporting success when Java code throws uncaught', async ({
+  codePage,
+}) => {
+  // Regression test for a real bug found while validating an unrelated
+  // hardening fix (-XX:MaxDirectMemorySize): jdi/Debugger.java's exit-code
+  // check only special-cased exit 137 (SIGKILL/OOM) — an uncaught exception
+  // in the target (conventionally exit 1) was never checked at all, so the
+  // driver fell through to its own normal exit 0. ProcessSandboxRunner/
+  // ExecutionJob (API side) only decide completed-vs-failed from the
+  // driver's own exit code, never from the trace's event content — so ANY
+  // uncaught exception in sandboxed Java code (an extremely common case for
+  // a step-through learning tool: users write bugs on purpose) silently
+  // reported `status: "completed"` with a truncated trace and zero
+  // indication anything failed. Confirmed via POST /executions before
+  // fixing: a program that prints "before" then throws an
+  // ArrayIndexOutOfBoundsException showed 1 step + "before", status
+  // completed — the crash simply vanished. Fixed with a `System.exit(1)`
+  // (same pattern the multi-thread block already used) plus capturing the
+  // target's own stderr (already redirected to the driver) to surface the
+  // real exception message as a clean error event.
+  await codePage.goto();
+
+  await codePage.replaceCode(
+    'public class Main { public static void main(String[] a) { ' +
+      'System.out.println("before"); int[] arr = new int[3]; ' +
+      'System.out.println(arr[10]); System.out.println("after"); } }',
+  );
+
+  await codePage.runAndWaitForFinish();
+
+  await expect(codePage.banner).toContainText('ArrayIndexOutOfBoundsException', {
     timeout: 10_000,
   });
 });

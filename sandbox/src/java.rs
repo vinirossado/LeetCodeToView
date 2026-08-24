@@ -142,21 +142,36 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         // makes the JVM's own container-detection log a *guaranteed*
         // "[warning][os,container] Cgroup ... controller path ... seems to
         // have moved ..." on every single run, for both the driver JVM here
-        // and the target JVM launched below — harmless (heap/metaspace
-        // limits are already pinned explicitly via -Xmx/-XX:MaxMetaspaceSize,
-        // not cgroup-autodetected) but it shares this process's real stdout
+        // and the target JVM launched below — harmless (heap/metaspace/
+        // direct-memory limits are already pinned explicitly via -Xmx/
+        // -XX:MaxMetaspaceSize/-XX:MaxDirectMemorySize, not cgroup-
+        // autodetected) but it shares this process's real stdout
         // with the sandboxed program's own output (see events::run_nsjail),
         // so it was leaking into the user-facing stdout panel. This flag
         // only silences that log tag, it doesn't disable container support.
         "-Xlog:os+container=off",
         "-XX:CompressedClassSpaceSize=64m",
         "-Xmx128m",
+        // -XX:MaxDirectMemorySize: off-heap memory (java.nio.ByteBuffer.
+        // allocateDirect, usable by sandboxed user code) is NOT covered by
+        // -Xmx at all — it's a separate allocator. Empirically confirmed
+        // (not assumed) that HotSpot already defaults this to match -Xmx
+        // when unset (tested inside this exact container: -Xmx256m alone
+        // already capped ByteBuffer.allocateDirect at exactly 256MB,
+        // -Xmx100m at exactly 100MB) — so this was never actually an open
+        // bypass, just an implicit, undocumented-at-the-call-site behavior
+        // this codebase would rather not depend on silently. Set explicitly
+        // here anyway, matching each JVM's own -Xmx, so the limit is a
+        // visible invariant instead of something a future JDK version (or
+        // someone changing -Xmx without knowing about this coupling) could
+        // silently break.
+        "-XX:MaxDirectMemorySize=128m",
         &format!("-Dspike.sample={}", opts.sample_n),
         "-cp", "/app/jdi-out",
         "Debugger",
         class_name,
         &format!(
-            "-Xlog:os+container=off -XX:CompressedClassSpaceSize=64m -cp {} -Xmx256m -XX:MaxMetaspaceSize=64m",
+            "-Xlog:os+container=off -XX:CompressedClassSpaceSize=64m -cp {} -Xmx256m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=256m",
             src_dir.to_str().unwrap()
         ),
     ]);

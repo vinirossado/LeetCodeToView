@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './support/fixtures';
 
 // Regression coverage for a real bug found this session: monaco-editor's own
 // CSS was never bundled into the production build (esbuild wasn't picking up
@@ -8,31 +8,29 @@ import { expect, test } from '@playwright/test';
 // `node_modules/monaco-editor/min/vs/editor/editor.main.css` to
 // `angular.json`'s `styles` array. This suite would have caught that bug;
 // it exists so it can never silently regress again.
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.clear());
-});
 
 test('Monaco renders with its own CSS applied (line positioning is absolute, not stacked in document flow)', async ({
-  page,
+  codePage,
 }) => {
-  await page.goto('/');
+  await codePage.goto();
 
-  const firstViewLine = page.locator('.view-line').first();
-  await expect(firstViewLine).toBeVisible();
+  await expect(codePage.firstViewLine).toBeVisible();
 
-  const position = await firstViewLine.evaluate((el) => getComputedStyle(el).position);
+  const position = await codePage.firstViewLine.evaluate((el) => getComputedStyle(el).position);
   expect(position).toBe('absolute');
 });
 
-test('editor renders the Java starter code lines in the correct visual (top-to-bottom) order', async ({ page }) => {
-  await page.goto('/');
+test('editor renders the Java starter code lines in the correct visual (top-to-bottom) order', async ({
+  codePage,
+}) => {
+  await codePage.goto();
 
   // Starter code (app.ts STARTER_CODE.java) starts with the class
   // declaration and ends with the println inside the loop — if Monaco's CSS
   // is broken, view-lines lose their `top` offset and can render in the
   // wrong visual order relative to each other.
-  const classLine = page.locator('.view-line', { hasText: 'public class Main' });
-  const printlnLine = page.locator('.view-line', { hasText: 'System.out.println' });
+  const classLine = codePage.viewLineContaining('public class Main');
+  const printlnLine = codePage.viewLineContaining('System.out.println');
 
   await expect(classLine).toBeVisible();
   await expect(printlnLine).toBeVisible();
