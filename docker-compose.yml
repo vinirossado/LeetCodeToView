@@ -1,0 +1,31 @@
+# Local-dev stack: run everything with `docker compose up --build`.
+#
+# `api` bundles the Quarkus API + sandbox-runner + static-analyzer in one
+# container (see Dockerfile.api for why: no real IPC contract between API
+# and Sandbox Controller yet, ProcessSandboxRunner/ProcessStaticAnalyzer
+# shell out to local binaries). It needs nsjail's namespace/cgroup
+# privileges to actually sandbox anything — `privileged: true` mirrors what
+# was needed in this project's own Fase 0.5 spike testing (see tasks.md
+# "Achado de ambiente... Docker Desktop"); this is broader than nsjail
+# strictly needs and is NOT meant to be how this runs in production; the
+# `.ci/` deploy path should scope this down (or move nsjail's capabilities
+# to the real Sandbox Controller service once that split exists).
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8080:8080"
+    privileged: true
+    environment:
+      - DOTNET_GCHeapHardLimit=0x8000000
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    ports:
+      - "4200:80"
+    depends_on:
+      - api

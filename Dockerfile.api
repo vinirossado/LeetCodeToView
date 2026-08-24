@@ -1,0 +1,102 @@
+# Combined image: Quarkus API + sandbox-runner (Rust/nsjail) + static-analyzer,
+# all in one container.
+#
+# WHY COMBINED (interim, local-dev only — see tasks.md "Definir contrato/IPC
+# entre API e Sandbox Controller"): ProcessSandboxRunner/ProcessStaticAnalyzer
+# shell out to these binaries as LOCAL subprocesses (ProcessBuilder, absolute
+# paths), not over any network protocol — there's no IPC contract yet. So for
+# now the API container needs the binaries on its own filesystem, and needs
+# nsjail's privileges (see docker-compose.yml: `privileged: true`) to actually
+# sandbox anything. This is explicitly NOT the target production shape (the
+# Sandbox Controller running untrusted code shouldn't share a container with
+# the public-facing API) — revisit when the real IPC contract is designed.
+
+FROM debian:bookworm-slim AS toolchain
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    flex bison \
+    pkg-config \
+    libprotobuf-dev protobuf-compiler \
+    libnl-route-3-dev \
+    libcap-dev \
+    libseccomp-dev \
+    git \
+    curl \
+    gnupg \
+    ca-certificates \
+    openjdk-17-jdk-headless \
+    libicu-dev \
+    python3 \
+    maven \
+    && rm -rf /var/lib/apt/lists/*
+
+# .NET SDK — same install approach as sandbox/Dockerfile (no apt package)
+RUN curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
+    && bash /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet \
+    && rm /tmp/dotnet-install.sh
+ENV PATH="/usr/share/dotnet:${PATH}"
+ENV DOTNET_ROOT="/usr/share/dotnet"
+
+# nsjail has no apt package — build from source
+RUN git clone --depth 1 https://github.com/google/nsjail.git /tmp/nsjail \
+    && cd /tmp/nsjail && make \
+    && cp nsjail /usr/local/bin/nsjail \
+    && cd / && rm -rf /tmp/nsjail
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# JDK 25 for running the Quarkus API itself, kept separate from the JDK 17
+# above: java.rs hardcodes `/usr/bin/java` for the SANDBOXED user code path
+# (via update-alternatives from openjdk-17-jdk-headless), and that must stay
+# JDK 17 — it's what jdi/Debugger.java was validated against all session.
+# Quarkus is launched with an explicit JAVA_HOME instead of touching PATH.
+# Installed via Eclipse Temurin's own apt repo (verified reachable), not a
+# guessed tarball URL.
+RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" > /etc/apt/sources.list.d/adoptium.list \
+    && apt-get update && apt-get install -y --no-install-recommends temurin-25-jdk \
+    && rm -rf /var/lib/apt/lists/*
+ENV JDK25_HOME="/usr/lib/jvm/temurin-25-jdk-amd64"
+
+# ─── Build sandbox-runner + jdi Debugger ──────────────────────────────────
+FROM toolchain AS sandbox-build
+WORKDIR /build/sandbox
+COPY sandbox/ .
+RUN cargo build --release
+RUN javac -encoding UTF-8 -d /build/jdi-out jdi/Debugger.java
+
+# ─── Build static-analyzer ────────────────────────────────────────────────
+FROM toolchain AS analyzer-build
+WORKDIR /build/static-analyzer
+COPY static-analyzer/ .
+RUN cargo build --release
+
+# ─── Build the Quarkus API ────────────────────────────────────────────────
+FROM toolchain AS api-build
+WORKDIR /build/api
+COPY api/pom.xml .
+COPY api/.mvn .mvn
+COPY api/mvnw .
+RUN JAVA_HOME=$JDK25_HOME ./mvnw -q -B dependency:go-offline || true
+COPY api/src src
+RUN JAVA_HOME=$JDK25_HOME ./mvnw -q -B package -DskipTests
+
+# ─── Runtime ───────────────────────────────────────────────────────────────
+FROM toolchain
+WORKDIR /app
+
+COPY --from=sandbox-build /build/sandbox/target/release/sandbox-runner /app/sandbox-runner
+COPY --from=sandbox-build /build/jdi-out /app/jdi-out
+COPY --from=analyzer-build /build/static-analyzer/target/release/static-analyzer /app/static-analyzer
+COPY --from=api-build /build/api/target/quarkus-app /app/quarkus-app
+
+ENV SANDBOX_RUNNER_BIN="/app/sandbox-runner"
+ENV STATIC_ANALYZER_BIN="/app/static-analyzer"
+
+EXPOSE 8080
+
+CMD ["/usr/lib/jvm/jdk-25/bin/java", "-Dsandbox.runner.binary-path=/app/sandbox-runner", \
+     "-Dstatic-analyzer.binary-path=/app/static-analyzer", \
+     "-jar", "/app/quarkus-app/quarkus-run.jar"]
