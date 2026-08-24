@@ -1,0 +1,39 @@
+# Swarm stack for the frontend (Angular build served by nginx — see
+# .ci/Dockerfile.frontend). Deploy with:
+#   docker stack deploy -c .ci/stack-fe.yml leetcodeview-fe
+# (deploy-fe.sh does exactly this — see .ci/readme.md).
+#
+# No published host port, same as the reference stack.yml's `web` service —
+# this relies on an external reverse proxy already running on the VPS,
+# attached to the same `proxy_net` overlay network, to route public traffic
+# in. Internally, nginx (.ci/nginx.frontend.conf) proxies /executions and
+# /analysis to the `leetcodeview` stack's `api` service by its Swarm
+# cross-stack DNS name (`leetcodeview_api`) — see that file's comment for
+# why this differs from the local docker-compose nginx.conf.
+services:
+  web:
+    image: pizito:5001/leetcodeview-fe:latest
+    networks:
+      - proxy_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      replicas: 2
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 5s
+      rollback_config:
+        order: start-first
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+networks:
+  proxy_net:
+    external: true

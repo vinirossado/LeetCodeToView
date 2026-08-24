@@ -1,0 +1,97 @@
+# Swarm stack for the backend (Quarkus API + sandbox-runner + static-
+# analyzer, one combined image — see .ci/Dockerfile). Deploy with:
+#   docker stack deploy -c .ci/stack.yml leetcodeview
+# (deploy.sh does exactly this, sourcing env vars from an untracked .env
+# on the VPS first — see .ci/readme.md).
+#
+# ── OPEN QUESTION, UNRESOLVED — nsjail's privilege requirement in Swarm ──
+# docker-compose.yml (local dev) uses `privileged: true` + `cgroup: host`
+# on this service so nsjail can create namespaces/cgroups (see that file's
+# own comment, and tasks.md's Fase 0.5 finding: nsjail needs the HOST's
+# root cgroupv2 hierarchy, confirmed empirically). Neither field exists in
+# Swarm-mode stack files:
+#   - `privileged: true` is silently ignored by `docker stack deploy`
+#     ("Ignoring unsupported options: privileged") — confirmed via search,
+#     this is a long-standing, deliberate Swarm limitation, not a bug.
+#   - `cgroup: host` (Compose's `--cgroupns=host` equivalent) has no
+#     documented Swarm-mode counterpart at all.
+#   - `cap_add`/`cap_drop` (below) ARE supported by `docker stack deploy`
+#     since Docker CE 20.10, but adding specific capabilities is NOT the
+#     same as `--privileged` (which also disables seccomp/AppArmor
+#     confinement and grants device access). tasks.md's own Fase 0.5 spike
+#     already tried a fairly broad capability set by hand
+#     (`cap_sys_admin,cap_sys_chroot,cap_net_admin,cap_sys_resource,
+#     cap_setuid,cap_setgid` via setcap) and found it INSUFFICIENT — nsjail
+#     failed at `setgroups` inside the user namespace it creates. `cap_add`
+#     below is included as a best-effort partial mitigation, NOT a verified
+#     fix — do not treat it as closing this gap.
+#
+# Real options identified, none implemented/verified here (see tasks.md):
+#   (a) Run the Sandbox Controller as a plain `docker run --privileged
+#       --cgroupns=host` container OUTSIDE Swarm's service model entirely
+#       (e.g. a systemd unit on the VPS host), with the API talking to it
+#       over the network instead of subprocess — but this needs the real
+#       API/Sandbox-Controller IPC contract that doesn't exist yet either
+#       (see .ci/Dockerfile's header comment and tasks.md).
+#   (b) A docker-socket-bind-mount "privileged proxy" pattern some Swarm
+#       users use to launch privileged siblings from an unprivileged Swarm
+#       service — adds a docker.sock exposure (root-equivalent host access)
+#       to work around a different privilege gap, arguably worse.
+#   (c) Move to Firecracker microVMs (already on the roadmap, spec.md
+#       "Evolução: Firecracker/microVM") — sidesteps needing nsjail's
+#       elevated container privileges entirely, since isolation would no
+#       longer depend on this container's own namespace/cgroup access.
+# None of these were built or tested in this task — flagged here and in
+# tasks.md as a real, open gap rather than papered over with cap_add.
+services:
+  api:
+    image: pizito:5001/leetcodeview:latest
+    cap_add:
+      - SYS_ADMIN
+      - SYS_CHROOT
+      - NET_ADMIN
+      - SYS_RESOURCE
+      - SETUID
+      - SETGID
+    environment:
+      # Second-line-of-defense .NET heap cap (see spec.md "Hardening de
+      # memória") — same value as docker-compose.yml. Not a secret, kept
+      # hardcoded like the reference stack.yml does for its own non-secret
+      # vars (NODE_ENV etc.).
+      - DOTNET_GCHeapHardLimit=0x8000000
+    networks:
+      - proxy_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+    deploy:
+      # 1 replica, deliberately: this service holds elevated host
+      # privileges (cap_add above, and whatever eventually replaces the
+      # privileged/cgroup-host gap noted above) to run nsjail against
+      # arbitrary user-submitted code. Multiplying replicas multiplies the
+      # blast radius of that privilege surface across the Swarm cluster —
+      # scale only after the privileged-mode gap above has a real answer.
+      replicas: 1
+      update_config:
+        order: start-first
+        failure_action: rollback
+        delay: 5s
+      rollback_config:
+        order: start-first
+      resources:
+        limits:
+          # Starting point, not load-tested: two JDKs (17 for sandboxed
+          # Java, 25 for Quarkus itself) plus on-demand `dotnet build` for
+          # C# compilation plus nsjail's own cgroup-limited child processes
+          # can all be resident at once. tasks.md's own spikes needed up to
+          # rlimit_as=3072MB for a single multi-thread Java execution —
+          # revisit under real load.
+          cpus: '2'
+          memory: 4G
+
+networks:
+  proxy_net:
+    external: true

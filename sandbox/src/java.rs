@@ -8,10 +8,24 @@
 // atingir — ver jdi/Debugger.java. `memory_bytes` fica sempre `null`: não
 // há hoje um jeito de ler o heap do processo alvo (lançado à parte via
 // `LaunchingConnector`) sem JMX-over-JDWP, não implementado.
+//
+// Fase 2 hardening: nsjail is now run via `events::run_nsjail` (not a bare
+// `.status()` with everything inherited) so we can turn opaque kills/crashes
+// into clean events on our own stdout before this process exits — see
+// events.rs for the shared timeout/OOM/output-cap detection. Stack overflow
+// is Java-specific: jdi/Debugger.java already redirects the *target* JVM's
+// stderr into its own (see `redirectStream` in Debugger.java), which flows
+// through nsjail's inherited stderr up to the stream `run_nsjail` captures
+// here — so an uncaught StackOverflowError shows up as a normal JVM crash
+// line ("Exception in thread \"main\" java.lang.StackOverflowError") in
+// `stderr_lines`, regardless of whether user code catches/rethrows it.
+// Confirmed empirically: see tasks.md "Fase 2".
 
 use std::env;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+use crate::events::{self, Event, RunOutcome};
 
 pub struct RunOptions {
     pub time_limit_secs: String,
@@ -52,35 +66,52 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
 
     eprintln!("[sandbox-runner/java] rodando {class_name} isolado via nsjail...");
 
-    Command::new("nsjail")
-        .args([
-            "--mode", "o",
-            "--time_limit", &opts.time_limit_secs,
-            "--rlimit_as", "3072",
-            "--rlimit_cpu", "10",
-            "--rlimit_nproc", "512",
-            "--rlimit_nofile", "1024",
-            "--use_cgroupv2",
-            "--cgroup_mem_max", "536870912",
-            "--cgroup_pids_max", "512",
-            "--chroot", "/",
-            "--cwd", src_dir.to_str().unwrap(),
-            "--quiet",
-            "--",
-            "/usr/bin/java",
-            "-XX:CompressedClassSpaceSize=64m",
-            "-Xmx128m",
-            &format!("-Dspike.sample={}", opts.sample_n),
-            "-cp", "/app/jdi-out",
-            "Debugger",
-            class_name,
-            &format!(
-                "-XX:CompressedClassSpaceSize=64m -cp {} -Xmx256m -XX:MaxMetaspaceSize=64m",
-                src_dir.to_str().unwrap()
-            ),
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .expect("falha ao rodar nsjail (está instalado e no PATH?)")
+    let mut cmd = Command::new("nsjail");
+    cmd.args([
+        "--mode", "o",
+        "--time_limit", &opts.time_limit_secs,
+        "--rlimit_as", "3072",
+        "--rlimit_cpu", "10",
+        "--rlimit_nproc", "512",
+        "--rlimit_nofile", "1024",
+        "--use_cgroupv2",
+        "--cgroup_mem_max", "536870912",
+        "--cgroup_pids_max", "512",
+        "--chroot", "/",
+        "--cwd", src_dir.to_str().unwrap(),
+        // NOT --quiet: nsjail's own INFO-level log line ("run time >= time
+        // limit ... Killing it") is the ONLY way to tell a --time_limit
+        // kill apart from a cgroup OOM kill — both end up as the exact same
+        // exit code (128+SIGKILL=137, see nsjail's reapProc: `return 128 +
+        // WTERMSIG(status)`), so --quiet (which drops LOG_I) would make the
+        // two indistinguishable. See events::run_nsjail /
+        // NSJAIL_TIMEOUT_MARKER. Confirmed empirically (see tasks.md
+        // "Fase 2") — with --quiet, the marker line never reaches our
+        // stderr-scanning code at all.
+        "--",
+        "/usr/bin/java",
+        "-XX:CompressedClassSpaceSize=64m",
+        "-Xmx128m",
+        &format!("-Dspike.sample={}", opts.sample_n),
+        "-cp", "/app/jdi-out",
+        "Debugger",
+        class_name,
+        &format!(
+            "-XX:CompressedClassSpaceSize=64m -cp {} -Xmx256m -XX:MaxMetaspaceSize=64m",
+            src_dir.to_str().unwrap()
+        ),
+    ]);
+
+    let result = events::run_nsjail(cmd);
+    match result.outcome {
+        RunOutcome::TimedOut => events::emit(&Event::Timeout),
+        RunOutcome::LikelyOom => events::emit(&Event::MemoryLimitExceeded),
+        RunOutcome::OutputTruncated => events::emit(&Event::OutputTruncated),
+        RunOutcome::Normal => {
+            if result.stderr_lines.iter().any(|l| l.contains("StackOverflowError")) {
+                events::emit(&Event::StackOverflow);
+            }
+        }
+    }
+    result.status
 }

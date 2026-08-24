@@ -1,0 +1,53 @@
+name: CI - Sandbox
+
+# Only run when files under sandbox/ (or this workflow itself) change.
+on:
+  push:
+    paths:
+      - "sandbox/**"
+      - ".github/workflows/ci-sandbox.yml"
+  pull_request:
+    paths:
+      - "sandbox/**"
+      - ".github/workflows/ci-sandbox.yml"
+
+jobs:
+  build-and-test:
+    name: Build & test (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sandbox
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sandbox
+
+      # This crate has three binary targets (sandbox-runner, plus the legacy
+      # spike binaries sandbox-spike / icordebug-spike) sharing one Cargo.toml.
+      # Building --all-targets catches real compile breakage across all three
+      # and their test harnesses.
+      - name: Build all binary targets
+        run: cargo build --release --all-targets
+
+      # NOTE (scoping decision, see tasks.md Fase 0): this crate currently has
+      # no #[test]-based unit tests. Its real validation throughout this
+      # project happened by manually running the compiled sandbox-runner
+      # binary inside a privileged nsjail/Docker setup against snippets under
+      # sandbox/test-snippets*/ - that requires --privileged/cgroup access a
+      # standard GitHub-hosted runner does not reliably provide, plus a large
+      # toolchain (JDK, .NET SDK, nsjail built from source, netcoredbg).
+      # Wiring that up is out of scope for "basic CI" and needs its own
+      # dedicated investigation. This step is a no-op safety net today and
+      # will start pulling weight the moment real #[test]s are added; the
+      # actual regression signal from this job right now is the build step
+      # above.
+      - name: Run unit tests (if any)
+        run: cargo test --release

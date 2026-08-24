@@ -129,6 +129,39 @@ public class Debugger {
                 vm.resume();
             }
         }
+
+        // Architectural gap found empirically (Fase 2): LaunchingConnector
+        // runs the target as a SEPARATE JVM process from this Debugger
+        // process. A cgroup OOM kill lands on whichever process actually
+        // holds the memory — almost always the target, not this debugger —
+        // so nsjail's own exit-code/signal-based detection one level up
+        // (events::run_nsjail in java.rs, which only watches nsjail's
+        // DIRECT child, i.e. THIS process) never sees it: this process just
+        // observes a normal VMDeathEvent and would otherwise exit 0 with no
+        // trace of what happened. Confirmed by test: SIGKILLing the target
+        // process directly (simulating what a cgroup OOM kill does) leaves
+        // this Debugger process's own exit code untouched (0), silently
+        // swallowing the failure.
+        //
+        // Fix: check the target's own exit value. On Linux, a process
+        // killed by signal N conventionally reports 128+N here — the same
+        // convention nsjail itself uses (see events.rs). In this sandbox,
+        // nothing else configured for the jail can deliver an external
+        // SIGKILL to just the target process alone (--time_limit and
+        // --rlimit_cpu act on the whole jailed process tree, which would
+        // kill THIS process too and is already caught one level up), so an
+        // unexplained SIGKILL (exit value 137) of only the target is our
+        // best signal that the cgroup OOM killer picked it specifically.
+        try {
+            int exitValue = vm.process().exitValue();
+            if (exitValue == 137) {
+                System.out.println("{\"type\":\"memory_limit_exceeded\"}");
+            }
+        } catch (IllegalThreadStateException e) {
+            // Process hasn't actually exited yet — shouldn't happen once
+            // VMDeathEvent/VMDisconnectEvent has fired, but don't crash.
+        }
+
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
         System.err.println(String.format(
                 "[perf] suspendPolicy=%s skipData=%s sampleN=%d eventosTotais=%d emitidos=%d tempo=%dms taxaTotal=%.1f ev/s taxaEmitida=%.1f ev/s",

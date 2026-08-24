@@ -1,0 +1,44 @@
+name: CI - Static Analyzer
+
+# Only run when files under static-analyzer/ (or this workflow itself) change.
+on:
+  push:
+    paths:
+      - "static-analyzer/**"
+      - ".github/workflows/ci-static-analyzer.yml"
+  pull_request:
+    paths:
+      - "static-analyzer/**"
+      - ".github/workflows/ci-static-analyzer.yml"
+
+jobs:
+  build-and-test:
+    name: Build & test (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: static-analyzer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: static-analyzer
+
+      - name: Build
+        run: cargo build --release
+
+      # Unlike sandbox/, this crate's validation (tree-sitter parsing -> JSON
+      # output) has no privileged/nsjail dependency, so real automated
+      # regression tests are feasible here. tests/snippets.rs shells out to
+      # the built binary against every file under test-snippets/ (Java) and
+      # test-snippets-csharp/ (C#) with --json and asserts a clean exit plus
+      # well-formed JSON output - the same manual check this project used
+      # during development, now wired into CI.
+      - name: Run tests
+        run: cargo test --release

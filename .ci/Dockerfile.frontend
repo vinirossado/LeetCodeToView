@@ -1,0 +1,40 @@
+# Production image for the frontend: Angular build served by nginx.
+#
+# Why this file exists instead of reusing frontend/Dockerfile as-is:
+#   1. nginx.conf must differ — found by actually running the image, not
+#      by inspection. frontend/nginx.conf's `proxy_pass http://api:8080`
+#      is a docker-compose-only DNS alias; reused verbatim here, nginx
+#      crashes on startup ("host not found in upstream 'api'") because
+#      that host doesn't exist once frontend/backend are two separate
+#      Swarm stacks. See .ci/nginx.frontend.conf for the fix (Swarm
+#      cross-stack DNS name + deferred resolution).
+#   2. HEALTHCHECK — mirrors the reference stack's pattern (baked into the
+#      image, checked again by stack-fe.yml's `healthcheck:` block).
+#      frontend/Dockerfile is the local-dev image and doesn't have one;
+#      adding it there would be an unrelated change to a file used by
+#      docker-compose.yml, so it's added here instead.
+#   3. Build context — kept as "." (repo root), same as .ci/Dockerfile, so
+#      scripts/publish-fe.rb mirrors scripts/publish.rb exactly (same
+#      `context: '.'`, only `-f`/image name differ) instead of introducing
+#      a second build-context convention.
+# The Angular build steps themselves are unchanged from frontend/Dockerfile
+# — if those ever need a real change, mirror it here too.
+
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ .
+RUN npx ng build
+
+FROM nginx:1.27-alpine
+COPY --from=build /app/dist/frontend/browser /usr/share/nginx/html
+COPY .ci/nginx.frontend.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+# Liveness only: confirms nginx is up and serving the SPA shell, not that
+# the `api` upstream it proxies to is reachable (see nginx.conf) — the
+# backend has its own HEALTHCHECK in .ci/Dockerfile / stack.yml.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl -f http://127.0.0.1:80/ || exit 1

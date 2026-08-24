@@ -1,0 +1,41 @@
+name: CI - Frontend
+
+# Only run when files under frontend/ (or this workflow itself) change.
+on:
+  push:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/ci-frontend.yml"
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/ci-frontend.yml"
+
+jobs:
+  test:
+    name: Build & test (Angular / Vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npx ng build
+
+      # Vitest (via @angular/build:unit-test) runs headless by default - no
+      # browser flags needed, confirmed by running this locally.
+      - name: Run tests
+        run: npx ng test --watch=false

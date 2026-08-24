@@ -19,14 +19,14 @@
 
 use std::os::raw::{c_int, c_void};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::ptr;
 use std::time::{Duration, Instant};
 
 use libloading::Library;
 
 use crate::com;
-use crate::events::{self, Event};
+use crate::events::{self, Event, RunOutcome};
 
 pub const CSHARP_WORKER_FLAG: &str = "--csharp-worker";
 
@@ -93,6 +93,17 @@ impl Default for RunOptions {
 /// Chamado pelo dispatcher normal (fora do jail): compila o projeto e faz
 /// fork+exec do nsjail apontando pro nosso próprio binário com
 /// `--csharp-worker`, que vai rodar run_worker() já isolado.
+///
+/// Fase 2 hardening: run via `events::run_nsjail` instead of a bare
+/// `.status()` with everything inherited, so a `--time_limit` kill or a
+/// cgroup OOM kill of the worker (which run_worker() itself has no chance
+/// to react to — it just dies) still produces a clean `timeout`/
+/// `memory_limit_exceeded` event on our stdout. CoreCLR's own stack
+/// overflow behavior was tested empirically (see tasks.md "Fase 2") and,
+/// unlike Java's clean `StackOverflowError`, crashes the process with a
+/// raw SIGSEGV/SIGABRT and no reliably parseable stderr marker — so C#
+/// stack overflows currently fall through as a generic non-zero exit
+/// rather than a `stack_overflow` event (documented as an open item).
 pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
     let cwd = dll_file
         .parent()
@@ -103,34 +114,42 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
 
     eprintln!("[sandbox-runner/csharp] rodando {dll_file:?} isolado via nsjail (self re-exec)...");
 
-    Command::new("nsjail")
-        .args([
-            "--mode", "o",
-            "--time_limit", &opts.time_limit_secs,
-            "--keep_caps", // TODO(Fase 2): trocar por capabilities mínimas quando isso for resolvido
-            "--rlimit_fsize", "inf",
-            "--tmpfsmount", "/tmp",
-            "--rlimit_as", "3072",
-            "--rlimit_cpu", &opts.time_limit_secs,
-            "--rlimit_nproc", "256",
-            "--rlimit_nofile", "256",
-            "--use_cgroupv2",
-            "--cgroup_mem_max", "268435456",
-            "--cgroup_pids_max", "256",
-            "--chroot", "/",
-            "--cwd", cwd.to_str().unwrap(),
-            "--env", "DOTNET_ROOT=/usr/share/dotnet",
-            "--env", "PATH=/usr/share/dotnet:/usr/bin:/bin",
-            "--env", "DOTNET_GCHeapHardLimit=0x8000000",
-            "--quiet",
-            "--",
-        ])
-        .arg(self_exe)
-        .args([CSHARP_WORKER_FLAG, "--dll", dll_file.to_str().unwrap()])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .expect("falha ao rodar nsjail")
+    let mut cmd = Command::new("nsjail");
+    cmd.args([
+        "--mode", "o",
+        "--time_limit", &opts.time_limit_secs,
+        "--keep_caps", // TODO(Fase 2): trocar por capabilities mínimas quando isso for resolvido
+        "--rlimit_fsize", "inf",
+        "--tmpfsmount", "/tmp",
+        "--rlimit_as", "3072",
+        "--rlimit_cpu", &opts.time_limit_secs,
+        "--rlimit_nproc", "256",
+        "--rlimit_nofile", "256",
+        "--use_cgroupv2",
+        "--cgroup_mem_max", "268435456",
+        "--cgroup_pids_max", "256",
+        "--chroot", "/",
+        "--cwd", cwd.to_str().unwrap(),
+        "--env", "DOTNET_ROOT=/usr/share/dotnet",
+        "--env", "PATH=/usr/share/dotnet:/usr/bin:/bin",
+        "--env", "DOTNET_GCHeapHardLimit=0x8000000",
+        // NOT --quiet — see the identical comment in java.rs::run(): we
+        // need nsjail's own INFO-level "run time >= time limit" log line to
+        // tell a timeout kill apart from a cgroup OOM kill (both produce
+        // the exact same exit code otherwise).
+        "--",
+    ])
+    .arg(self_exe)
+    .args([CSHARP_WORKER_FLAG, "--dll", dll_file.to_str().unwrap()]);
+
+    let result = events::run_nsjail(cmd);
+    match result.outcome {
+        RunOutcome::TimedOut => events::emit(&Event::Timeout),
+        RunOutcome::LikelyOom => events::emit(&Event::MemoryLimitExceeded),
+        RunOutcome::OutputTruncated => events::emit(&Event::OutputTruncated),
+        RunOutcome::Normal => {}
+    }
+    result.status
 }
 
 /// Chamado quando o binário já está DENTRO do nsjail (detectado via
@@ -276,9 +295,21 @@ pub fn run_worker(dll_file: &Path) -> i32 {
     }
 
     // A partir daqui, toda a inspeção/emite-evento acontece dentro dos
-    // callbacks (com.rs) — só esperamos o processo terminar (ExitProcess)
-    // ou um timeout de segurança (o nsjail --time_limit externo também mata
-    // o processo, isso aqui é só pra devolver um evento explícito).
+    // callbacks (com.rs) — só esperamos o processo terminar (ExitProcess).
+    //
+    // This used to also race its own userspace deadline against nsjail's
+    // `--time_limit` and emit Event::Timeout itself if it won — but that's
+    // exactly backwards: nsjail's own --time_limit SIGKILLs THIS process
+    // (run_worker is the direct jailed child), so whichever fires first
+    // wins unpredictably, and if nsjail wins we're dead before finishing
+    // the emit anyway. Timeout detection now lives one level up, in
+    // run_outer() (via events::run_nsjail), which is NOT jailed and so
+    // reliably survives to observe nsjail's own kill and emit a clean event
+    // — see run_outer's doc comment. This inner deadline stays only as a
+    // safety net against a hang that isn't actually a --time_limit kill
+    // (e.g. stuck waiting on ExitProcess for some other reason); it just
+    // returns non-zero without emitting, since run_outer can't tell that
+    // apart from a normal crash either way.
     let run_timeout_secs: u64 = std::env::var("SPIKE_TIME_LIMIT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -289,14 +320,56 @@ pub fn run_worker(dll_file: &Path) -> i32 {
             break;
         }
         if Instant::now() > run_deadline {
-            events::emit(&Event::Timeout);
             return 1;
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Same architectural gap found and fixed on the Java side (see
+    // Debugger.java): `pid` here is the DEBUGGEE (launched via dbgshim's
+    // CreateProcessForLaunch as a real OS child of this process), separate
+    // from run_worker's own process. A cgroup OOM kill lands on whichever
+    // process actually holds the memory — the debuggee, not run_worker —
+    // so nsjail's own exit-code/signal-based detection one level up
+    // (events::run_nsjail in run_outer(), which only watches nsjail's
+    // DIRECT child, i.e. THIS process) would never see it: ICorDebug's
+    // ExitProcess callback (cb_exit_process) only sets PROCESS_EXITED,
+    // with no exit code, so we'd otherwise return 0 with no trace of what
+    // happened. Fix: reap the debuggee ourselves via a raw waitpid (no new
+    // dependency — same "no binding crate, hand-rolled FFI" style already
+    // used throughout com.rs) and check whether it died by SIGKILL.
+    unsafe {
+        let mut status: c_int = 0;
+        let rc = waitpid(pid as c_int, &mut status, WNOHANG);
+        eprintln!(
+            "[DEBUG csharp] waitpid(pid={pid}) rc={rc} status={status} last_os_error={:?}",
+            std::io::Error::last_os_error()
+        );
+        if rc > 0 && wifsignaled(status) && wtermsig(status) == SIGKILL {
+            events::emit(&Event::MemoryLimitExceeded);
+        }
     }
 
     if unsafe { com::FATAL_ERROR } {
         return 1;
     }
     0
+}
+
+// Raw waitpid FFI — deliberately not pulling in the `libc` crate for one
+// function, matching this file's/com.rs's existing style of hand-rolled FFI
+// declarations instead of binding crates.
+extern "C" {
+    fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+}
+const WNOHANG: c_int = 1;
+const SIGKILL: c_int = 9;
+
+fn wifsignaled(status: c_int) -> bool {
+    // Linux/glibc macro: WIFSIGNALED(status) = ((signed char)(((status) & 0x7f) + 1) >> 1) > 0
+    (((status & 0x7f) + 1) as i8 >> 1) > 0
+}
+
+fn wtermsig(status: c_int) -> c_int {
+    status & 0x7f
 }
