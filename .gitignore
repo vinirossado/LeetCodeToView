@@ -1,9 +1,13 @@
 # Rust (qualquer crate no monorepo: sandbox/, static-analyzer/, etc.)
 target/
 
-# .NET
-bin/
-obj/
+# .NET build output — scoped to where C# projects actually live, not a
+# bare `bin/`/`obj/`: a bare pattern also matches unrelated real source
+# dirs elsewhere in the repo (e.g. Rust's own `src/bin/` convention for
+# multiple binary targets, used by sandbox/src/bin/sandbox_runner.rs —
+# that got silently gitignored and never committed until this was caught).
+sandbox/test-snippets-csharp/**/bin/
+sandbox/test-snippets-csharp/**/obj/
 outdebug/
 out/
 

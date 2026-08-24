@@ -19,8 +19,19 @@ use std::os::raw::c_void;
 // simplesmente não emitem nada nele (comportamento antigo preservado).
 pub static mut STEP_SINK: Option<fn(i64, BTreeMap<String, serde_json::Value>, Vec<String>)> = None;
 pub static mut ERROR_SINK: Option<fn(String)> = None;
+// Fires once, the moment the step cap below is reached, so run_worker can
+// emit Event::StepLimitExceeded (same product-scope decision as the Java
+// side — see jdi/Debugger.java and events::STEP_EVENT_CAP).
+pub static mut LIMIT_SINK: Option<fn()> = None;
 pub static mut PROCESS_EXITED: bool = false;
 pub static mut FATAL_ERROR: bool = false;
+// Counts real step events emitted (not every StepComplete callback — only
+// ones where inspection actually produced an event), same definition the
+// Java side uses. Once it hits events::STEP_EVENT_CAP, cb_step_complete
+// stops arming a new stepper and just lets the program run to completion
+// uninstrumented, exactly like the JDI side.
+pub static mut STEP_EVENTS_EMITTED: u32 = 0;
+pub static mut STEP_CAPPED: bool = false;
 
 unsafe fn report_error(message: String) {
     FATAL_ERROR = true;
@@ -861,12 +872,20 @@ unsafe extern "C" fn cb_breakpoint(
     S_OK
 }
 
-/// Cada StepComplete inspeciona o frame atual e emite UM evento de step —
-/// sem amostragem/cap aqui (o modelo de produto é trace-and-replay: grava a
-/// execução inteira; um cap de eventos é trabalho futuro separado, já
-/// rastreado em tasks.md via events::STEP_EVENT_CAP). Se a inspeção falhar
-/// (ex: sem frame gerenciado ativo, perto do fim da execução), não emite
-/// nada nesse passo mas continua avançando de qualquer forma.
+// Must match events::STEP_EVENT_CAP in the lib crate — duplicated here
+// (rather than `use crate::events::STEP_EVENT_CAP`) for the same reason
+// STEP_SINK/LIMIT_SINK are indirections: this file is shared with the
+// legacy icordebug-spike binary, which has no `events` module.
+const STEP_EVENT_CAP: u32 = 5000;
+
+/// Cada StepComplete inspeciona o frame atual e emite UM evento de step.
+/// Ao atingir o cap de 5.000 eventos emitidos (`STEP_EVENT_CAP`, mesma
+/// decisão de escopo do lado Java — ver jdi/Debugger.java), para de armar
+/// um novo stepper e deixa o programa terminar sozinho, sem overhead de
+/// instrumentação — emite `step_limit_exceeded` uma única vez nesse
+/// momento. Se a inspeção falhar (ex: sem frame gerenciado ativo, perto do
+/// fim da execução), não emite nada nesse passo mas continua avançando de
+/// qualquer forma.
 unsafe extern "C" fn cb_step_complete(
     _this: *mut c_void,
     app_domain: *mut c_void,
@@ -874,19 +893,30 @@ unsafe extern "C" fn cb_step_complete(
     _stepper: *mut c_void,
     _reason: i32,
 ) -> HResult {
-    if let Ok(frame) = get_active_frame(thread) {
-        if let Ok(il_frame) = query_interface(frame, &IID_ICORDEBUG_IL_FRAME) {
-            let line = get_il_offset(il_frame).map(|o| o as i64).unwrap_or(-1);
-            let stack = get_call_stack_names(il_frame);
-            let locals = extract_locals(il_frame);
-            if let Some(sink) = STEP_SINK {
-                sink(line, locals, stack);
+    if !STEP_CAPPED {
+        if let Ok(frame) = get_active_frame(thread) {
+            if let Ok(il_frame) = query_interface(frame, &IID_ICORDEBUG_IL_FRAME) {
+                let line = get_il_offset(il_frame).map(|o| o as i64).unwrap_or(-1);
+                let stack = get_call_stack_names(il_frame);
+                let locals = extract_locals(il_frame);
+                if let Some(sink) = STEP_SINK {
+                    sink(line, locals, stack);
+                }
+                STEP_EVENTS_EMITTED += 1;
+                if STEP_EVENTS_EMITTED >= STEP_EVENT_CAP {
+                    STEP_CAPPED = true;
+                    if let Some(sink) = LIMIT_SINK {
+                        sink();
+                    }
+                }
             }
         }
     }
 
-    if let Ok(stepper) = create_stepper(thread) {
-        step_into(stepper);
+    if !STEP_CAPPED {
+        if let Ok(stepper) = create_stepper(thread) {
+            step_into(stepper);
+        }
     }
     continue_(app_domain);
     S_OK

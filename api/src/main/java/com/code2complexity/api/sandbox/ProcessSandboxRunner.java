@@ -21,6 +21,18 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 @ApplicationScoped
 public class ProcessSandboxRunner implements SandboxRunner {
 
+    // MUST NOT be under /tmp. csharp.rs's nsjail invocation mounts a fresh
+    // empty tmpfs at /tmp inside the jail (--tmpfsmount /tmp, needed for
+    // CoreCLR's diagnostic IPC socket — see spec.md "Estratégia C#"), which
+    // shadows/hides anything the API wrote there beforehand: a .dll built
+    // under the JVM's default temp dir (java.io.tmpdir, itself /tmp on
+    // Linux) becomes invisible to the jailed child, and nsjail fails with
+    // "chdir(...): No such file or directory" — reproduced empirically
+    // running the real Docker image. /var/tmp is outside that remount and
+    // was already the established workaround elsewhere in this project's
+    // Fase 0.5 spike testing, for the same underlying reason.
+    private static final Path WORK_DIR_ROOT = Path.of("/var/tmp");
+
     // Mirrors the settings already validated against sandbox-runner's C#
     // path (sandbox/test-snippets-csharp/*/*.csproj) — same TFM, same
     // flags. Framework-dependent build (no <SelfContained>), because
@@ -43,7 +55,8 @@ public class ProcessSandboxRunner implements SandboxRunner {
 
     @Override
     public void run(Execution execution, Consumer<String> onLine) throws IOException, InterruptedException {
-        Path workDir = Files.createTempDirectory("code2complexity-" + UUID.randomUUID());
+        Files.createDirectories(WORK_DIR_ROOT);
+        Path workDir = Files.createTempDirectory(WORK_DIR_ROOT, "code2complexity-" + UUID.randomUUID());
         try {
             Path fileToRun = switch (execution.getLanguage()) {
                 case "java" -> writeJavaSource(workDir, execution.getCode());

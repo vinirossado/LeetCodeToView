@@ -140,8 +140,9 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
 /// depois de um número fixo de passos e só imprimir em stderr, cada
 /// StepComplete de verdade (ver com.rs::cb_step_complete) emite um
 /// `events::Event::Step` via stdout — o modelo de produto é trace-and-replay
-/// (grava a execução inteira, sem amostragem aqui; um cap de eventos é
-/// trabalho futuro separado).
+/// (grava a execução inteira, sem amostragem aqui). O cap de 5.000 eventos
+/// (`events::STEP_EVENT_CAP`) já está implementado em com.rs, mesma decisão
+/// de escopo do lado Java.
 pub fn run_worker(dll_file: &Path) -> i32 {
     let cwd = dll_file
         .parent()
@@ -166,8 +167,13 @@ pub fn run_worker(dll_file: &Path) -> i32 {
             eprintln!("[sandbox-runner/csharp/worker] erro (callback): {message}");
             events::emit(&Event::Error { message });
         });
+        com::LIMIT_SINK = Some(|| {
+            events::emit(&Event::StepLimitExceeded);
+        });
         com::PROCESS_EXITED = false;
         com::FATAL_ERROR = false;
+        com::STEP_EVENTS_EMITTED = 0;
+        com::STEP_CAPPED = false;
     }
 
     let lib = match unsafe { Library::new(LIBDBGSHIM_PATH) } {
