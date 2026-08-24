@@ -63,6 +63,12 @@ static mut P_CORDB: *mut c_void = ptr::null_mut();
 // see the comment on LOCAL_NAME_RESOLVER in com.rs), hence a static instead
 // of a local variable threaded through.
 static mut PDB: Option<PortablePdb> = None;
+// Set once at the top of run_worker, read from the STEP_SINK closure below
+// to fill Event::Step's time_ns — same reason as PDB above: STEP_SINK is a
+// plain `fn` pointer (com::STEP_SINK's declared type), so it can't capture
+// a local `t0` the way jdi/Debugger.java's t0 is a plain local variable.
+// Mirrors Java's "elapsed since the driver started" semantics.
+static mut RUN_START: Option<Instant> = None;
 
 extern "C" fn startup_callback(p_cordb: *mut c_void, _parameter: *mut c_void, hr: HResult) {
     unsafe {
@@ -189,12 +195,14 @@ pub fn run_worker(dll_file: &Path) -> i32 {
     // legado icordebug-spike, que não tem o módulo `events` — ver comentário
     // em com.rs junto de STEP_SINK/ERROR_SINK).
     unsafe {
+        RUN_START = Some(Instant::now());
         com::STEP_SINK = Some(|line, locals, stack| {
+            let time_ns = RUN_START.map(|t0| t0.elapsed().as_nanos() as u64);
             events::emit(&Event::Step {
                 line,
                 locals,
                 stack,
-                time_ns: None,
+                time_ns,
                 memory_bytes: None,
             });
         });

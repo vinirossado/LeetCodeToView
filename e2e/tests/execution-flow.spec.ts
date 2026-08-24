@@ -195,17 +195,18 @@ test('blocks Java code that spawns a real thread, with a clear message instead o
   // be worse than no test at all.
   await page.goto('/');
 
-  // insertText, not type: see the "rejects Java code without a class named
-  // Main" test above for why `type` corrupts brace/paren/quote-heavy
-  // content on this Monaco editor (confirmed to be the actual cause of
-  // this test's flakiness, not the multi-thread detection it's meant to
-  // exercise — reproduced with a throwaway debug test dumping the
-  // post-type buffer content: the submitted code silently kept 9 stale
-  // lines of the starter example, so the request failed at compile time
-  // and never reached the JDI multi-thread check at all).
-  await page.locator('.view-line').first().click();
-  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a');
-  await page.keyboard.insertText(
+  // Uses replaceEditorContent (support/monaco.ts): a peer session flagged
+  // this test failing deterministically with a javac syntax error instead
+  // of exercising the JDI multi-thread check at all. Root-caused (not
+  // assumed) with a throwaway debug test dumping `.view-line` contents
+  // after the old raw click+press+type sequence: `type`'s per-keystroke
+  // handling of this brace/paren/quote-heavy one-liner desynced from the
+  // selection, silently leaving 9 stale lines of the starter example below
+  // the typed text — so the submitted "file" never compiled. See the
+  // helper's doc comment for the second, independent select-all race also
+  // found and fixed in the same pass.
+  await replaceEditorContent(
+    page,
     'class Main { public static void main(String[] a) throws InterruptedException { ' +
       'Thread t = new Thread(() -> System.out.println("hi")); t.start(); t.join(); } }',
   );
