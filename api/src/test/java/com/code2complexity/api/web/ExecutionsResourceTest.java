@@ -65,7 +65,7 @@ class ExecutionsResourceTest {
         void createsAndReturns201() {
             given()
                     .contentType(ContentType.JSON)
-                    .body("{\"language\":\"java\",\"code\":\"int x = 1;\"}")
+                    .body("{\"language\":\"java\",\"code\":\"class Main { public static void main(String[] a) { int x = 1; } }\"}")
                     .when().post("/executions")
                     .then()
                     .statusCode(201)
@@ -108,6 +108,29 @@ class ExecutionsResourceTest {
         }
 
         @Test
+        @DisplayName("rejects Java code without a class named Main, with 422")
+        void rejectsJavaWithoutMainClass() {
+            given()
+                    .contentType(ContentType.JSON)
+                    .body("{\"language\":\"java\",\"code\":\"class Solution { void run() {} }\"}")
+                    .when().post("/executions")
+                    .then()
+                    .statusCode(422)
+                    .body("error", containsString("Main"));
+        }
+
+        @Test
+        @DisplayName("does not require a Main class for C#, only for Java")
+        void doesNotRequireMainClassForCsharp() {
+            given()
+                    .contentType(ContentType.JSON)
+                    .body("{\"language\":\"csharp\",\"code\":\"Console.WriteLine(1);\"}")
+                    .when().post("/executions")
+                    .then()
+                    .statusCode(201);
+        }
+
+        @Test
         @DisplayName("rejects a body that isn't valid JSON with 400")
         void rejectsInvalidJson() {
             given()
@@ -123,7 +146,7 @@ class ExecutionsResourceTest {
         void invokesRunner() {
             String executionId = given()
                     .contentType(ContentType.JSON)
-                    .body("{\"language\":\"java\",\"code\":\"int x = 1;\"}")
+                    .body("{\"language\":\"java\",\"code\":\"class Main { public static void main(String[] a) { int x = 1; } }\"}")
                     .when().post("/executions")
                     .then().statusCode(201)
                     .extract().path("execution_id");
@@ -132,7 +155,7 @@ class ExecutionsResourceTest {
 
             assertEquals(1, runner.getRunCalls().size());
             assertEquals("java", runner.getRunCalls().get(0).language());
-            assertEquals("int x = 1;", runner.getRunCalls().get(0).code());
+            assertEquals("class Main { public static void main(String[] a) { int x = 1; } }", runner.getRunCalls().get(0).code());
         }
 
         @Test
@@ -142,7 +165,7 @@ class ExecutionsResourceTest {
 
             String executionId = given()
                     .contentType(ContentType.JSON)
-                    .body("{\"language\":\"java\",\"code\":\"int x = 1;\"}")
+                    .body("{\"language\":\"java\",\"code\":\"class Main { public static void main(String[] a) { int x = 1; } }\"}")
                     .when().post("/executions")
                     .then().statusCode(201)
                     .extract().path("execution_id");
@@ -165,7 +188,7 @@ class ExecutionsResourceTest {
 
             String executionId = given()
                     .contentType(ContentType.JSON)
-                    .body("{\"language\":\"java\",\"code\":\"int x = 1;\"}")
+                    .body("{\"language\":\"java\",\"code\":\"class Main { public static void main(String[] a) { int x = 1; } }\"}")
                     .when().post("/executions")
                     .then().statusCode(201)
                     .extract().path("execution_id");
@@ -187,7 +210,7 @@ class ExecutionsResourceTest {
 
             String executionId = given()
                     .contentType(ContentType.JSON)
-                    .body("{\"language\":\"java\",\"code\":\"int x = 1;\"}")
+                    .body("{\"language\":\"java\",\"code\":\"class Main { public static void main(String[] a) { int x = 1; } }\"}")
                     .when().post("/executions")
                     .then().statusCode(201)
                     .extract().path("execution_id");

@@ -1,0 +1,19 @@
+.unsupported {
+  font-size: 0.9em;
+  opacity: 0.85;
+}
+
+.raw-message {
+  font-size: 0.75em;
+  opacity: 0.6;
+  font-family: monospace;
+}
+
+.error {
+  color: var(--c2c-error, #c0392b);
+}
+
+.evidence {
+  font-size: 0.85em;
+  opacity: 0.85;
+}

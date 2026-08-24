@@ -13,11 +13,24 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @Path("/executions")
 public class ExecutionsResource {
 
     private static final Set<String> VALID_LANGUAGES = Set.of("java", "csharp");
+
+    // Best-effort check, not a real parser: sandbox-runner always writes
+    // Java source to a file named Main.java, and javac requires that name
+    // to match a class declared in the file (does NOT have to be public —
+    // `class Main { public static void main(...) }` compiles and runs
+    // fine without the `public` modifier on the class itself). This only
+    // exists to turn a common mistake into an immediate, clear 422 instead
+    // of an opaque javac failure surfacing minutes later as `status:
+    // failed`; it can have false negatives (unusual formatting) or false
+    // positives (a comment/string containing "class Main") — javac itself
+    // remains the actual source of truth either way.
+    private static final Pattern JAVA_MAIN_CLASS = Pattern.compile("\\bclass\\s+Main\\b");
 
     @Inject
     ExecutionStore store;
@@ -39,6 +52,11 @@ public class ExecutionsResource {
         }
         if (code.isBlank()) {
             return Response.status(422).entity(new ErrorResponse("code is required")).build();
+        }
+        if ("java".equals(language) && !JAVA_MAIN_CLASS.matcher(code).find()) {
+            return Response.status(422)
+                    .entity(new ErrorResponse("Java code must declare a class named Main (the file is compiled as Main.java)"))
+                    .build();
         }
 
         Execution execution = store.create(language, code);

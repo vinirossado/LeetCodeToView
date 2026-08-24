@@ -1,0 +1,29 @@
+<section class="panel">
+  <h3>Tempo e memória por passo</h3>
+  <p class="disclaimer">
+    Valores medidos sob instrumentação (overhead do debugger, JIT warmup, pausas de GC) — não é
+    um benchmark confiável, só uma visualização relativa da execução.
+  </p>
+  @if (steps().length === 0) {
+    <p class="empty">sem dados ainda</p>
+  } @else {
+    <div class="chart">
+      <span class="chart-label">time_ns</span>
+      <svg viewBox="0 0 100 40" preserveAspectRatio="none">
+        <polyline [attr.points]="timePoints()" fill="none" stroke="currentColor" stroke-width="1" />
+        @if (markerX(); as x) {
+          <line [attr.x1]="x" y1="0" [attr.x2]="x" y2="40" class="marker" />
+        }
+      </svg>
+    </div>
+    <div class="chart">
+      <span class="chart-label">memory_bytes</span>
+      <svg viewBox="0 0 100 40" preserveAspectRatio="none">
+        <polyline [attr.points]="memoryPoints()" fill="none" stroke="currentColor" stroke-width="1" />
+        @if (markerX(); as x) {
+          <line [attr.x1]="x" y1="0" [attr.x2]="x" y2="40" class="marker" />
+        }
+      </svg>
+    </div>
+  }
+</section>

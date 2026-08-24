@@ -146,7 +146,7 @@ Mesma estratégia do Sandbox Runner: provar o desenho numa linguagem antes de re
 
   **Limitação honesta encontrada e documentada, não corrigida**: um binary search clássico com early return (`if (arr[mid] == target) return mid;` dentro do loop) cai em "não determinado" sob a heurística atual, porque qualquer `return` condicional dentro de um loop é tratado como saída dependente de dado — mesmo quando um humano provaria O(log n) pelo particionamento do intervalo. Escolha deliberada (falso "não sei" é preferível a falso O(log n) com confiança); por isso o snippet de log usado (`LogDivide.java`) evita esse padrão. Fica registrado como refinamento futuro possível (distinguir "early exit que só atalha o pior caso" de "early exit que muda o pior caso"), não bloqueante para o MVP
 
-- [ ] **Próximo passo (não feito nesta tarefa)**: adaptador AST (C#) → Complexity IR, usando `tree-sitter-c-sharp` (crates.io). A Complexity IR (`ir.rs`) e o Complexity Engine (`engine.rs`) já são independentes de linguagem por desenho — só falta escrever o adaptador C#, análogo ao `java_adapter.rs`, mapeando a gramática do `tree-sitter-c-sharp` (nomes de campo/nós diferentes do Java, precisam ser confirmados por dump de AST real antes de implementar, mesma disciplina usada no adaptador Java) para os mesmos `ControlNode`
+- [ ] **Próximo passo (não feito nesta tarefa)**: adaptador AST (C#) → Complexity IR, usando `tree-sitter-c-sharp` (crates.io). A Complexity IR (`ir.rs`) e o Complexity Engine (`engine.rs`) já são independentes de linguagem por desenho — só falta escrever o adaptador C#, análogo ao `java_adapter.rs`, mapeando a gramática do `tree-sitter-c-sharp` (nomes de campo/nós diferentes do Java, precisam ser confirmados por dump de AST real antes de implementar, mesma disciplina usada no adaptador Java) para os mesmos `ControlNode`. **Agora tem consumidor real esperando por isso**: `POST /analysis` na API (ver seção "API (Java/Quarkus)") já está no ar e responde `501` explicitamente pra C# — assim que o adaptador existir, é só trocar o `if (!"java".equals(language))` em `ProcessStaticAnalyzer` pela lista de linguagens suportadas, nada mais muda no contrato HTTP
 
 ### API (Java/Quarkus)
 
@@ -164,21 +164,123 @@ Mesma estratégia do Sandbox Runner: provar o desenho numa linguagem antes de re
 - [x] **Achado importante (relido `java.rs`/o relato do fork sobre o worker C#, não descoberto em teste automatizado): stdout do programa sandboxado vem intercalado no mesmo stream que os eventos JSON.** `java.rs`/`csharp.rs` rodam o alvo com `Stdio::inherit()` — ou seja, um `System.out.println`/`Console.WriteLine` do código do usuário sai literalmente na mesma stdout do processo `sandbox-runner`, junto com as linhas JSON do `Debugger`. A primeira versão de `ExecutionJob` assumia que toda linha era JSON válido (`MAPPER.readTree(line)` direto) — uma linha de stdout como `"ola mundo"` (não é JSON válido sem aspas) lançava exceção, que **parava o processamento de TODAS as linhas seguintes** (não só marcava aquela linha como erro — a exceção subia e cancelava o `while` que lê o resto do stream), fazendo qualquer execução com `println` real terminar com trace truncado e `status: failed`. Corrigido: linhas que não são um objeto JSON com campo `"type"` agora viram um evento sintético `{"type":"stdout","text":"..."}`, adicionado do lado da API (não existe em `sandbox/src/events.rs` — é uma extensão só da API sobre o schema do Rust, o frontend precisa saber disso). Coberto por teste (`wrapsRawStdoutLines`)
 - [ ] Definir contrato/IPC entre API (Quarkus) e Sandbox Controller (Rust) de verdade — o que existe hoje (`ProcessSandboxRunner`, ver abaixo) é a escolha mais simples possível (fork+exec direto do binário `sandbox-runner`, sem fila/gRPC/socket), não uma decisão definitiva validada; falta empacotar nsjail na imagem, e depois decidir se isso basta ou se precisa de fila (Redis/NATS) pra desacoplar API de sandbox controller rodando em hosts diferentes
 - [x] **Passo de compilação C# (fonte → dll) implementado e validado.** `ProcessSandboxRunner#compileCsharp` gera um `.csproj` mínimo (mesmo TFM/flags já validados em `sandbox/test-snippets-csharp/*/*.csproj`: `net8.0`, `ImplicitUsings`, `Nullable`, `InvariantGlobalization`) + `Program.cs` com o código recebido (sem exigir nome de classe — statements top-level do C# não têm essa restrição, diferente do Java), roda `dotnet build -c Debug -o out/` (framework-dependent, sem `SelfContained`, porque `csharp.rs` invoca via `dotnet <dll>`, não apphost standalone), e passa o `.dll` gerado pro `sandbox-runner`. Erro de compilação (exit code != 0 do `dotnet build`) vira `IOException` com o output completo do compilador, capturado por `ExecutionJob` como `status: failed`. **Validado com o jar empacotado de verdade**: `POST /executions` com C# real (`Console.WriteLine(1 + 2);`) — `dotnet build` gerou `app.dll` com sucesso, `sandbox-runner` aceitou o dll e chegou até a chamada do nsjail (que falha só por não existir no host macOS local, mesmo comportamento já visto no smoke test do Java — confirma que o passo de compilação em si funciona ponta a ponta)
-- [ ] **Gap restante, não bloqueia as specs (que usam `FakeSandboxRunner`, nunca tocam o binário real)**: pra Java, o arquivo continua sempre `Main.java`, exigindo que o código do usuário declare `public class Main` — não validado na entrada (sem erro amigável se o usuário usar outro nome de classe, só falha de `javac` dentro do `sandbox-runner`)
+- [x] **Validação de `class Main` no Java, implementada e validada de verdade.** `ExecutionsResource` agora rejeita `POST /executions` de Java com `422` se o código não contém `\bclass\s+Main\b` (regex best-effort, não um parser — documentado como tal no código: não exige o modificador `public` porque javac não exige, já que `class Main { public static void main(...) }` sem `public` na classe compila e roda normalmente; pode ter falso positivo/negativo em casos incomuns, mas javac continua sendo a fonte da verdade real por trás). Existia antes só como falha opaca de `javac` dentro do `sandbox-runner`, minutos depois, como `status: failed` — agora é `422` imediato e claro. **Validado com o jar empacotado de verdade**: código sem `class Main` → `422 {"error":"Java code must declare a class named Main..."}`; com `class Main` → `201` normal. C# não tem essa exigência (sem restrição de nome pra top-level statements), confirmado que a validação só se aplica a `language=="java"`.
+- [x] **`POST /analysis` implementado e validado — a análise estática (`static-analyzer/`) agora está exposta via API, não é mais só CLI.** `StaticAnalyzer`/`ProcessStaticAnalyzer` (mesmo padrão de `SandboxRunner`/`ProcessSandboxRunner`, com `FakeStaticAnalyzer` pras specs) — mas **síncrono**, sem virtual thread/streaming: análise estática via tree-sitter é parsing, não execução de código do usuário, então não passa pelo nsjail nem precisa do modelo assíncrono do `/executions` (endpoint anotado `@Blocking` pra não travar a thread do Vert.x, já que ainda é I/O de subprocesso). Request `{"language","code"}`, resposta `200 {"methods":[{method_name,line,time,space,evidence[]}]}` (schema real do `static-analyzer --json`, verificado rodando de verdade, não suposto — `time`/`space` vêm como string solta pra variante sem dado ex. `"Constant"`, ou `{"Polynomial":2}`/`{"Unknown":"motivo"}` pras variantes com dado, serialização default do serde); `422` (language/code inválido, mesmo formato de `/executions`); **`501`** quando a linguagem não tem adaptador (hoje: qualquer coisa != `"java"` — `UnsupportedLanguageException` dedicada, não um erro genérico, já que C# é esperado permanentemente até o adaptador existir, não um bug transiente); `500` em falha inesperada do binário. **Validado com o jar empacotado de verdade** contra um loop aninhado real: `POST /analysis` com `for(...){for(...){...}}` retornou `{"methods":[{"method_name":"main",...,"time":{"Polynomial":2},...,"evidence":["linha 1: loop com incremento linear","linha 1: loop com incremento linear"]}]}` — confirma o pipeline inteiro (subprocesso, `--json`, parsing da resposta) funcionando ponta a ponta
 
 ### Frontend (TypeScript + Angular)
-- [ ] Estrutura inicial do projeto (Angular CLI, standalone components)
-- [ ] Editor de código (Monaco ou CodeMirror)
-- [ ] Cliente WebSocket para consumir eventos de execução (buffer local do trace conforme os eventos chegam)
-- [ ] Fallback para `GET /executions/:id/trace` — carregar trace completo se a página abrir depois da execução terminar, ou reconectar sem perder estado
-- [ ] Navegação client-side (step forward/back, breakpoints) sobre o trace já recebido, sem round-trip pro servidor
-- [ ] Painel de execução linha a linha (highlight da linha atual)
-- [ ] Painel de variáveis locais
-- [ ] Painel de call stack
-- [ ] Painel de stdout/stderr
-- [ ] Mensagem explícita quando `step_limit_exceeded`/`timeout`/`memory_limit_exceeded` interrompem a execução — explicar o motivo, não deixar a UI travada sem feedback
-- [ ] Indicador de complexidade (Big-O) vindo da análise estática
-- [ ] Gráfico/timeline de tempo de execução e uso de memória
+
+> **Escolha de editor: Monaco (não CodeMirror).** Motivo: é o editor da própria VS Code, com
+> tokenização Monarch embutida para Java/C# sem configuração extra, API madura de decorations
+> (usada para o highlight de linha atual e os marcadores de breakpoint no gutter) e de eventos de
+> clique no gutter (usada para toggle de breakpoint) — exatamente as duas necessidades centrais
+> deste app. CodeMirror 6 seria mais leve, mas exigiria montar/validar gramáticas de linguagem e a
+> camada de decorations do zero; não valia a troca para o escopo do MVP.
+
+Desenvolvido BDD-first (specs Vitest — `describe`/`it`, escritas junto com cada peça, não depois),
+mesma disciplina do resto do monorepo. **99 exemplos, 0 falhas** (`npx ng test --watch=false`,
+15 arquivos de spec). `npx ng build` gera um bundle de produção válido (3.62 MB inicial,
+dentro do budget configurado em `angular.json`; a maior parte é o próprio Monaco).
+
+- [x] Estrutura inicial do projeto (Angular CLI, standalone components) — `ng new frontend` via
+  Angular CLI 22.1.5 (`frontend/`), standalone por padrão (sem NgModules), zoneless (sem
+  dependência de `zone.js` — padrão do Angular 22), test runner Vitest (padrão do CLI nessa
+  versão, ver `angular.json` → `architect.test.builder: "@angular/build:unit-test"`). Base URL da
+  API/WS configurável via `src/environments/environment.ts` +
+  `environment.development.ts` (trocado via `fileReplacements` na configuration `development`),
+  com default `http://localhost:8080`/`ws://localhost:8080` em dev, igual ao Quarkus dev server
+  documentado no spec.md
+- [x] Editor de código (Monaco) — `features/editor/code-editor.component.ts`, seletor de linguagem
+  java/csharp no `app.html` (`<select>` ligado a `App.language`), botão "Run" que dispara
+  `ExecutionSessionService.run()`. Trocar a linguagem no seletor (`App.onLanguageChange`) substitui
+  o código no editor por um exemplo pronto daquela linguagem (`STARTER_CODE` em `app.ts`) — não
+  deixa o editor vazio/obsoleto depois da troca; `CodeEditorComponent` ganhou um `effect` dedicado
+  pra empurrar mudanças de `value` pro modelo do Monaco depois da criação inicial (`setValue`,
+  só quando o texto realmente mudou, pra não brigar com o cursor durante digitação normal). O
+  exemplo de Java declara `class Main` de propósito — a API real valida isso
+  (`\bclass\s+Main\b`, 422 `"Java code must declare a class named Main..."` caso contrário, já que
+  o arquivo é compilado como `Main.java`); coberto por teste (`app.spec.ts`, regex igual à do
+  backend). Testado com `monaco-editor` inteiramente mockado (`vi.mock`) — Monaco exige
+  layout/canvas real que o jsdom não fornece, então o teste verifica só a integração (options
+  passadas a `monaco.editor.create`, decorations aplicadas, mapeamento de linguagem, sync de
+  `value`), não o rendering interno do Monaco
+- [x] Cliente WebSocket para consumir eventos de execução (buffer local do trace conforme os
+  eventos chegam) — `core/services/execution-socket.service.ts`, `WebSocket` nativo por trás de um
+  `InjectionToken` (`websocket-factory.ts`) trocável por um fake em teste (7 testes, incluindo o
+  frame `{"type":"error","message":"execution not found"}` documentado no spec.md). O buffer em si
+  vive em `TraceStoreService`, não no cliente de socket
+- [x] Fallback para `GET /executions/:id/trace` — `core/services/execution-session.service.ts`
+  (`load()`): busca o trace completo primeiro; se `status` ainda for `pending`/`running`,
+  reconecta o WebSocket e **descarta os primeiros N frames replayed** (N = eventos já obtidos via
+  REST), já que o servidor sempre reenvia o buffer inteiro ao conectar (spec.md "Reconexão") — sem
+  isso os eventos apareceriam duplicados no trace. `App` persiste o `execution_id` em
+  `localStorage` assim que ele é conhecido e chama `load()` nele no próximo carregamento da
+  página, cobrindo o caso "abrir a página depois da execução terminar" de ponta a ponta
+- [x] Navegação client-side (step forward/back, breakpoints) sobre o trace já recebido, sem
+  round-trip pro servidor — `core/services/trace-store.service.ts`, o núcleo do app: um array
+  `events` (signal) + um cursor client-side (`-1..totalSteps()`, onde `totalSteps()` é uma posição
+  "fully replayed" que também revela stdout/eventos terminais depois do último step). Cobre
+  step forward/back, jump to start/end, breakpoints (`toggleBreakpoint`/`runToNextBreakpoint`/
+  `runToPreviousBreakpoint`), "seguir ao vivo" (o cursor acompanha o WebSocket enquanto a execução
+  roda, e para de seguir assim que o usuário navega manualmente — retomado só ao voltar pra ponta
+  do trace) e cálculo de stdout acumulado até o ponto atual respeitando a intercalação cronológica
+  real entre `step` e `stdout`. 24 exemplos cobrindo cada um desses comportamentos isoladamente
+- [x] Painel de execução linha a linha (highlight da linha atual no editor, seguindo o cursor
+  client-side) — `CodeEditorComponent` aplica uma decoration Monaco (`deltaDecorations` +
+  `revealLineInCenter`) a partir do input `currentLine`, ligado a
+  `trace.currentStep()?.line` em `App`
+- [x] Painel de variáveis locais (respeitando a assimetria Java/C# descrita acima) —
+  `features/panels/variables-panel.component.ts`: mostra nome+valor de cada entrada de `locals`;
+  quando `language === 'csharp'` exibe um aviso visível de que as chaves (`local_0`, `local_1`,
+  ...) são posições, não nomes reais — nunca finge que são nomes de variável de verdade
+- [x] Painel de call stack — `features/panels/call-stack-panel.component.ts`, frame mais interno
+  primeiro (o backend manda `stack` do mais externo pro mais interno)
+- [x] Painel de stdout/stderr — `features/panels/output-panel.component.ts`, alimentado por
+  `trace.outputSoFar()` (acumulado dos eventos sintéticos `"stdout"`) mais, se presente, a
+  mensagem do evento terminal `"error"`. Não existe um canal `"stderr"` separado no backend (só
+  `stdout` + o evento `error`), então não foi inventado um painel de stderr à parte — documentado
+  no comentário do componente
+- [x] Mensagem explícita quando `step_limit_exceeded`/`timeout`/`memory_limit_exceeded`/
+  `stack_overflow`/`output_truncated` interrompem a execução — `terminalEventMessage()`
+  (`core/models/execution-event.model.ts`) dá uma explicação em português por tipo de evento
+  terminal; `StatusBannerComponent` renderiza isso independente da posição do cursor (é
+  informação sobre a execução inteira, não sobre o passo em tela). `step_limit_exceeded`
+  explicitamente enquadrado como limite de escopo deliberado (menciona o cap de 5.000), não bug
+- [x] Indicador de complexidade (Big-O) vindo da análise estática — **endpoint real
+  `POST /analysis` passou a existir na API no meio desta tarefa** (contrato validado pelo autor da
+  API contra o binário do `static-analyzer`); `core/services/complexity-api.service.ts` chama esse
+  endpoint de verdade via `HttpClient` (mesma base URL configurável de tudo mais) e reduz os
+  status HTTP a um discriminated union `AnalysisOutcome` (`core/models/analysis.model.ts`):
+  `200 → ok`, `501 → unsupported_language` (estado real e permanente pro C# hoje — adaptador
+  tree-sitter-c-sharp ainda não existe, tratado na UI como "não suportado ainda para C#", não como
+  bug), `422`/`500`/outros → `error`. `ComplexityPanelComponent` sempre mostra o texto do motivo
+  em `Unknown` (nunca um "não determinado" mudo) e replica a mensagem "(nenhum método encontrado)"
+  do próprio CLI do analisador para o caso de resultado vazio. Chamado a cada clique em "Run"
+  (`App.onRun` → `runAnalysis`), independente do fluxo de execução/trace (sem `execution_id`
+  envolvido, como documentado)
+- [x] Gráfico/timeline de tempo de execução e uso de memória —
+  `features/panels/timeline-chart.component.ts`, SVG inline (sem lib externa) com uma polyline por
+  métrica (`time_ns`, `memory_bytes`) por passo do trace já bufferizado, marcador na posição do
+  passo atual. Disclaimer de ruído sempre visível: "medido sob instrumentação (...) não é um
+  benchmark confiável" (spec.md "Precisão das métricas")
+
+**Em aberto / não feito nesta tarefa:**
+- [ ] Integração ao vivo contra a API/sandbox reais (Quarkus dev server em `localhost:8080` +
+  `sandbox-runner`) não foi exercitada nesta sessão — API e sandbox estão sendo desenvolvidos em
+  paralelo por outra pessoa, então o frontend foi construído e testado inteiramente contra o
+  contrato documentado no spec.md + fakes/mocks (HttpTestingController, `WebSocketLike` fake,
+  Monaco mockado). Todo o código de integração (`ExecutionApiService`, `ExecutionSocketService`,
+  `ComplexityApiService`) usa exatamente as rotas/formas de payload documentadas, mas uma
+  verificação ponta a ponta contra um servidor real ainda não rolou
+- [ ] Worker do Monaco (`MonacoEnvironment.getWorker`) não configurado — só é necessário pra
+  language *services* (autocomplete/diagnostics; Java/C# aqui usam só highlight via gramática
+  Monarch, que roda sem worker). Uma tentativa de configurar via `new Worker(new URL(...))` não
+  resolveu limpo no bundler esbuild do Angular; ficou como aviso inofensivo no console
+  ("falling back to loading web worker code in main thread") em vez de bloquear. Revisitar se
+  algum dia for preciso autocomplete/diagnostics de verdade no editor
+- [ ] Sem autoplay/timer de reprodução automática do trace — só navegação manual (step/breakpoint/
+  jump to start-end) foi pedida nos deliverables e é o que existe; um "play" cronometrado ficaria
+  fácil de adicionar em cima de `TraceStoreService.stepForward()` mais tarde, se vira feature
+  pedida
 
 ## Fase 2 — Segurança / Hardening
 

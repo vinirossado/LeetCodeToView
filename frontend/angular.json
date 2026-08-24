@@ -24,7 +24,10 @@
                 "input": "public"
               }
             ],
-            "styles": ["src/styles.css"]
+            "styles": ["src/styles.css"],
+            "loader": {
+              ".ttf": "file"
+            }
           },
           "configurations": {
             "production": {

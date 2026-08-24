@@ -33,20 +33,8 @@ function toMonacoLanguage(language: Language): string {
 @Component({
   selector: 'app-code-editor',
   standalone: true,
-  template: `<div class="editor-host" #host></div>`,
-  styles: [
-    `
-      :host {
-        display: block;
-        height: 100%;
-      }
-      .editor-host {
-        width: 100%;
-        height: 100%;
-        min-height: 320px;
-      }
-    `,
-  ],
+  templateUrl: './code-editor.component.html',
+  styleUrl: './code-editor.component.css',
 })
 export class CodeEditorComponent implements AfterViewInit, OnDestroy {
   readonly language = input.required<Language>();
@@ -80,6 +68,19 @@ export class CodeEditorComponent implements AfterViewInit, OnDestroy {
     effect(() => {
       const breakpoints = this.breakpoints();
       this.applyBreakpointDecorations(breakpoints);
+    });
+
+    // Reacts to `value` changing *after* creation — e.g. the language
+    // selector swapping in a starter example. Guarded against the model
+    // already holding this text so the `onDidChangeModelContent` this
+    // triggers doesn't bounce back through `valueChange` as a no-op churn.
+    effect(() => {
+      const value = this.value();
+      const editorInstance = this.editorInstance;
+      if (!editorInstance) return;
+      if (editorInstance.getValue() !== value) {
+        editorInstance.setValue(value);
+      }
     });
   }
 

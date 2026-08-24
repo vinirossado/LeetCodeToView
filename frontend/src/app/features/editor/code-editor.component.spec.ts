@@ -4,10 +4,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // Monaco needs real layout/canvas/workers that jsdom does not provide, and we
 // only want to verify *our* wiring (create/update calls, decorations,
 // gutter-click -> breakpoint toggle), not Monaco's own rendering — so the
-// whole module is replaced with spies.
+// whole module is replaced with spies. `setValue`/`getValue` share a tiny
+// bit of real state so the "only call setValue when the text actually
+// differs" guard in the component can be exercised meaningfully.
+let modelValue = '';
 const editorInstance = {
-  setValue: vi.fn(),
-  getValue: vi.fn(() => ''),
+  setValue: vi.fn((v: string) => {
+    modelValue = v;
+  }),
+  getValue: vi.fn(() => modelValue),
   onDidChangeModelContent: vi.fn(),
   onMouseDown: vi.fn(),
   deltaDecorations: vi.fn(() => []),
@@ -41,6 +46,7 @@ import { CodeEditorComponent } from './code-editor.component';
 describe('CodeEditorComponent', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    modelValue = '';
     TestBed.configureTestingModule({ imports: [CodeEditorComponent] });
   });
 
@@ -49,6 +55,8 @@ describe('CodeEditorComponent', () => {
     fixture.componentRef.setInput('language', 'java');
     fixture.componentRef.setInput('value', 'int x = 1;');
     fixture.detectChanges();
+    modelValue = 'int x = 1;'; // simulate Monaco having applied the initial `value` create() option
+    editorInstance.setValue.mockClear();
     return fixture;
   }
 
@@ -88,5 +96,19 @@ describe('CodeEditorComponent', () => {
     fixture.componentRef.setInput('currentLine', null);
     fixture.detectChanges();
     expect(editorInstance.deltaDecorations).toHaveBeenCalled();
+  });
+
+  it('pushes a new `value` (e.g. a starter example swapped in on language change) into the model', () => {
+    const fixture = create();
+    fixture.componentRef.setInput('value', 'for (int i = 0; i < 5; i++) {}');
+    fixture.detectChanges();
+    expect(editorInstance.setValue).toHaveBeenCalledWith('for (int i = 0; i < 5; i++) {}');
+  });
+
+  it('does not call setValue when the model already holds that text (avoids clobbering the cursor while typing)', () => {
+    const fixture = create();
+    fixture.componentRef.setInput('value', 'int x = 1;'); // same as the initial value from create()
+    fixture.detectChanges();
+    expect(editorInstance.setValue).not.toHaveBeenCalled();
   });
 });

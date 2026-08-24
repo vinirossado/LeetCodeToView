@@ -1,0 +1,12 @@
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  flex-wrap: wrap;
+}
+
+.count {
+  margin-left: auto;
+  font-size: 0.85em;
+  opacity: 0.75;
+}

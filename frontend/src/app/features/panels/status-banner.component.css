@@ -1,0 +1,11 @@
+.banner {
+  padding: 0.75em 1em;
+  border-radius: 4px;
+  background: var(--c2c-error-bg, #fdecea);
+  color: var(--c2c-error, #c0392b);
+}
+
+.banner.warning {
+  background: var(--c2c-warning-bg, #fff8e1);
+  color: var(--c2c-warning, #8a6d00);
+}

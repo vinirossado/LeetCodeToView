@@ -1,0 +1,67 @@
+:host {
+  display: block;
+  font-family:
+    system-ui,
+    -apple-system,
+    sans-serif;
+}
+
+.topbar {
+  padding: 0.75em 1em;
+  border-bottom: 1px solid #ddd;
+}
+
+.topbar h1 {
+  font-size: 1.1em;
+  margin: 0;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
+  gap: 1em;
+  padding: 1em;
+}
+
+.editor-column {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75em;
+  min-width: 0;
+}
+
+.panels-column {
+  display: flex;
+  flex-direction: column;
+  gap: 1em;
+  min-width: 0;
+}
+
+.run-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+}
+
+.execution-id {
+  font-family: monospace;
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+.editor {
+  height: 420px;
+  border: 1px solid #ddd;
+}
+
+.csharp-note {
+  font-size: 0.85em;
+  opacity: 0.8;
+  background: var(--c2c-warning-bg, #fff8e1);
+  padding: 0.5em 0.75em;
+  border-radius: 4px;
+}
+
+.error {
+  color: var(--c2c-error, #c0392b);
+}

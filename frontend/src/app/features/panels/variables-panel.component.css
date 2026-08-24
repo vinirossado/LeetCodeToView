@@ -1,0 +1,21 @@
+.disclaimer {
+  font-size: 0.85em;
+  opacity: 0.8;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25em 0.75em;
+  margin: 0;
+}
+
+dt {
+  font-weight: 600;
+  font-family: monospace;
+}
+
+dd {
+  margin: 0;
+  font-family: monospace;
+}

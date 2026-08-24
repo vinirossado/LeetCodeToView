@@ -1,0 +1,31 @@
+<div class="controls">
+  <button type="button" title="Ir para o início" (click)="jumpToStart.emit()" [disabled]="!hasStarted()">
+    ⏹
+  </button>
+  <button
+    type="button"
+    title="Breakpoint anterior"
+    (click)="runToPreviousBreakpoint.emit()"
+    [disabled]="!hasStarted()"
+  >
+    ⏮ breakpoint anterior
+  </button>
+  <button type="button" title="Passo anterior" (click)="stepBack.emit()" [disabled]="!hasStarted()">
+    ⏮
+  </button>
+  <button type="button" title="Próximo passo" (click)="stepForward.emit()" [disabled]="atEnd()">
+    ⏭
+  </button>
+  <button
+    type="button"
+    title="Próximo breakpoint"
+    (click)="runToNextBreakpoint.emit()"
+    [disabled]="atEnd()"
+  >
+    ⏭ próximo breakpoint
+  </button>
+  <button type="button" title="Ir para o fim" (click)="jumpToEnd.emit()" [disabled]="atEnd()">
+    ⏩
+  </button>
+  <span class="count">{{ totalSteps() }} passos no trace</span>
+</div>

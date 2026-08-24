@@ -1,0 +1,11 @@
+<section class="panel">
+  <h3>Saída (stdout)</h3>
+  @if (output() === '' && !errorMessage()) {
+    <p class="empty">sem saída ainda</p>
+  } @else {
+    <pre>{{ output() }}</pre>
+  }
+  @if (errorMessage()) {
+    <p class="error">{{ errorMessage() }}</p>
+  }
+</section>

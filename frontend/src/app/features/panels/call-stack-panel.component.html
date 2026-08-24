@@ -1,0 +1,12 @@
+<section class="panel">
+  <h3>Call stack</h3>
+  @if (frames().length === 0) {
+    <p class="empty">nenhuma execução em andamento</p>
+  } @else {
+    <ol>
+      @for (frame of frames(); track $index) {
+        <li>{{ frame }}</li>
+      }
+    </ol>
+  }
+</section>

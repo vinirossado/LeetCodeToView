@@ -1,53 +1,39 @@
-import { Injectable } from '@angular/core';
+import { HttpClient, HttpErrorResponse } from '@angular/common/http';
+import { Injectable, inject } from '@angular/core';
+import { type Observable, catchError, map, of } from 'rxjs';
+import { environment } from '../../../environments/environment';
+import type { AnalysisOutcome, AnalysisResponse } from '../models/analysis.model';
+import type { ApiErrorResponse } from '../models/execution.model';
 import type { Language } from '../models/language';
-import type { MethodComplexity } from '../models/complexity.model';
+
+function errorMessageOf(err: HttpErrorResponse): string {
+  const body = err.error as ApiErrorResponse | null | undefined;
+  if (body?.error) return body.error;
+  return `${err.status} ${err.statusText}`.trim();
+}
 
 /**
- * TODO(backend gap — see tasks.md "Frontend"): there is currently no live
- * HTTP endpoint for static complexity analysis. `static-analyzer/` is only a
- * CLI (`cargo run -- file.java [--json]`); it is not wired into the API. This
- * service stands in for that endpoint with a tiny heuristic mock so the
- * complexity panel has something to render and can be swapped for a real
- * `ExecutionApiService`-style HTTP call later (same method signature) once
- * `POST /analysis` (or similar) exists — presumably following the same
- * subprocess pattern as `ProcessSandboxRunner`
- * (api/src/main/java/com/code2complexity/api/sandbox/ProcessSandboxRunner.java).
- *
- * Returns `null` to represent "não determinado" (analysis unavailable/not
- * recognized), matching the analyzer's own honest-uncertainty philosophy
- * (spec.md "Limitação conhecida: inferir complexidade... é fundamentalmente
- * heurístico") rather than ever fabricating a confident-looking Big-O guess.
+ * Client for `POST /analysis` — real endpoint (see tasks.md "Frontend"):
+ * request `{language, code}`, synchronous response, no execution_id/trace
+ * involved (independent of the sandbox run). Collapses the HTTP status codes
+ * into an AnalysisOutcome so callers never touch HttpErrorResponse directly:
+ *   200 -> { kind: 'ok', methods }
+ *   501 -> { kind: 'unsupported_language', message } (C# has no adapter yet — permanent-for-now, not a bug)
+ *   422/500/other -> { kind: 'error', message }
  */
 @Injectable({ providedIn: 'root' })
 export class ComplexityApiService {
-  async analyze(_language: Language, code: string): Promise<MethodComplexity[] | null> {
-    const nestedLoops = (code.match(/for\s*\(/g) ?? []).length >= 2;
-    const singleLoop = (code.match(/for\s*\(/g) ?? []).length === 1;
+  private readonly http = inject(HttpClient);
+  private readonly baseUrl = environment.apiBaseUrl;
 
-    if (nestedLoops) {
-      return [
-        {
-          method_name: 'main',
-          line: 1,
-          time: { Polynomial: 2 },
-          space: 'Constant',
-          evidence: ['[mock] detectados 2 laços aninhados no código enviado'],
-        },
-      ];
-    }
-
-    if (singleLoop) {
-      return [
-        {
-          method_name: 'main',
-          line: 1,
-          time: 'Linear',
-          space: 'Constant',
-          evidence: ['[mock] detectado 1 laço no código enviado'],
-        },
-      ];
-    }
-
-    return null;
+  analyze(language: Language, code: string): Observable<AnalysisOutcome> {
+    return this.http.post<AnalysisResponse>(`${this.baseUrl}/analysis`, { language, code }).pipe(
+      map((res): AnalysisOutcome => ({ kind: 'ok', methods: res.methods })),
+      catchError((err: HttpErrorResponse) => {
+        const message = errorMessageOf(err);
+        const kind = err.status === 501 ? 'unsupported_language' : 'error';
+        return of({ kind, message } as AnalysisOutcome);
+      }),
+    );
   }
 }

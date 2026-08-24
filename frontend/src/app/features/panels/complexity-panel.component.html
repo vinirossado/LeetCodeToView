@@ -1,0 +1,33 @@
+<section class="panel">
+  <h3>Complexidade (análise estática)</h3>
+  @if (loading()) {
+    <p class="empty">analisando…</p>
+  } @else if (!outcome()) {
+    <p class="empty">nenhuma análise executada ainda</p>
+  } @else if (outcome()!.kind === 'unsupported_language') {
+    <p class="unsupported">
+      Análise estática ainda não é suportada para C# — o adaptador AST (C#) → Complexity IR ainda
+      não foi implementado (ver tasks.md). Java já é suportado.
+    </p>
+    <p class="raw-message">{{ backendMessage() }}</p>
+  } @else if (outcome()!.kind === 'error') {
+    <p class="error">Não foi possível analisar o código: {{ errorMessage() }}</p>
+  } @else if (methods().length === 0) {
+    <p class="empty">(nenhum método encontrado)</p>
+  } @else {
+    @for (result of methods(); track result.method_name + result.line) {
+      <article class="method">
+        <h4>{{ result.method_name }} (linha {{ result.line }})</h4>
+        <p>Tempo: <strong>{{ formatTime(result.time) }}</strong></p>
+        <p>Espaço: <strong>{{ formatSpace(result.space) }}</strong></p>
+        @if (result.evidence.length > 0) {
+          <ul class="evidence">
+            @for (e of result.evidence; track e) {
+              <li>{{ e }}</li>
+            }
+          </ul>
+        }
+      </article>
+    }
+  }
+</section>
