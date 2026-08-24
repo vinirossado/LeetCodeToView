@@ -6,7 +6,28 @@
 
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::os::raw::c_void;
+
+// Indireção de emissão de evento: os callbacks COM abaixo são `extern "C" fn`
+// sem contexto arbitrário pra passar, e este arquivo é compartilhado (via
+// `mod com;`) pelo binário legado icordebug-spike, que não tem o módulo
+// `events` do crate da lib — então não dá pra chamar `crate::events::emit`
+// direto daqui. Em vez disso, csharp::run_worker seta esses ponteiros de
+// função (sem estado capturado, então cabem em `fn` puro) antes de iniciar a
+// sessão de debug; o icordebug-spike nunca seta os sinks, então os callbacks
+// simplesmente não emitem nada nele (comportamento antigo preservado).
+pub static mut STEP_SINK: Option<fn(i64, BTreeMap<String, serde_json::Value>, Vec<String>)> = None;
+pub static mut ERROR_SINK: Option<fn(String)> = None;
+pub static mut PROCESS_EXITED: bool = false;
+pub static mut FATAL_ERROR: bool = false;
+
+unsafe fn report_error(message: String) {
+    FATAL_ERROR = true;
+    if let Some(sink) = ERROR_SINK {
+        sink(message);
+    }
+}
 
 pub type HResult = i32;
 pub const S_OK: HResult = 0;
@@ -326,7 +347,7 @@ pub struct ILFrameVtbl {
     pub get_caller: unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> HResult,
     pub get_callee: *const c_void,
     pub create_stepper: *const c_void,
-    pub get_ip: *const c_void,
+    pub get_ip: unsafe extern "C" fn(*mut c_void, *mut u32, *mut i32) -> HResult,
     pub set_ip: *const c_void,
     pub enumerate_local_variables: *const c_void,
     pub get_local_variable: unsafe extern "C" fn(*mut c_void, u32, *mut *mut c_void) -> HResult,
@@ -346,6 +367,22 @@ pub unsafe fn get_caller(frame: *mut c_void) -> Result<Option<*mut c_void>, HRes
     }
 }
 
+/// Offset IL atual do frame (ICorDebugILFrame::GetIP) — usado como
+/// substituto de número de linha enquanto não há leitura de PDB (ver
+/// find_entry_point_token e spec.md: sem PDB, não existe mapeamento IL→linha
+/// C# original disponível via API COM nenhuma).
+pub unsafe fn get_il_offset(il_frame: *mut c_void) -> Result<u32, HResult> {
+    let vtbl = *(il_frame as *const *const ILFrameVtbl);
+    let mut offset: u32 = 0;
+    let mut mapping_result: i32 = 0;
+    let hr = ((*vtbl).get_ip)(il_frame, &mut offset, &mut mapping_result);
+    if hr == S_OK {
+        Ok(offset)
+    } else {
+        Err(hr)
+    }
+}
+
 pub unsafe fn get_function(frame: *mut c_void) -> Result<*mut c_void, HResult> {
     let vtbl = *(frame as *const *const ILFrameVtbl);
     let mut func: *mut c_void = std::ptr::null_mut();
@@ -357,11 +394,13 @@ pub unsafe fn get_function(frame: *mut c_void) -> Result<*mut c_void, HResult> {
     }
 }
 
-/// Sobe a call stack a partir de um frame, imprimindo o token do método de
-/// cada nível (sem nome ainda — isso depende de metadata/PDB, item futuro).
-pub unsafe fn print_call_stack(start_frame: *mut c_void) {
+/// Sobe a call stack a partir de um frame, devolvendo o nome de método
+/// (via metadata da assembly) de cada nível — sem número de linha, isso
+/// depende de PDB (item futuro, ver spec.md).
+pub unsafe fn get_call_stack_names(start_frame: *mut c_void) -> Vec<String> {
     let mut frame = start_frame;
     let mut depth = 0;
+    let mut names = Vec::new();
     loop {
         let name_str = match get_function(frame) {
             Ok(func) => {
@@ -373,34 +412,27 @@ pub unsafe fn print_call_stack(start_frame: *mut c_void) {
                     get_method_name(metadata, t).ok()
                 })();
                 match (name, token) {
-                    (Some(n), Ok(t)) => format!("{} (token=0x{:08x})", n, t),
-                    (None, Ok(t)) => format!("token=0x{:08x} (nome indisponível)", t),
-                    (_, Err(hr)) => format!("GetToken falhou: 0x{:08x}", hr as u32),
+                    (Some(n), _) => n,
+                    (None, Ok(t)) => format!("token=0x{:08x}", t),
+                    (None, Err(hr)) => format!("<GetToken falhou: 0x{:08x}>", hr as u32),
                 }
             }
-            Err(hr) => format!("GetFunction falhou: 0x{:08x}", hr as u32),
+            Err(hr) => format!("<GetFunction falhou: 0x{:08x}>", hr as u32),
         };
-        eprintln!("[callback]   call stack[{}]: frame={:?} {}", depth, frame, name_str);
+        names.push(name_str);
 
         match get_caller(frame) {
             Ok(Some(caller)) => {
                 frame = caller;
                 depth += 1;
                 if depth > 50 {
-                    eprintln!("[callback]   call stack: parando em 50 frames (proteção)");
-                    break;
+                    break; // proteção contra pilha corrompida/recursão absurda
                 }
             }
-            Ok(None) => {
-                eprintln!("[callback]   call stack: topo da pilha, {} frame(s) no total", depth + 1);
-                break;
-            }
-            Err(hr) => {
-                eprintln!("[callback]   GetCaller falhou: hr=0x{:08x}", hr as u32);
-                break;
-            }
+            _ => break,
         }
     }
+    names
 }
 
 pub unsafe fn get_local_variable(il_frame: *mut c_void, index: u32) -> Result<*mut c_void, HResult> {
@@ -829,50 +861,34 @@ unsafe extern "C" fn cb_breakpoint(
     S_OK
 }
 
-static mut STEP_COUNT: u32 = 0;
-const STEPS_BEFORE_INSPECT: u32 = 20; // inicialização de array com {1,2,3} usa vários IL steps (newarr + stelem por elemento)
-
+/// Cada StepComplete inspeciona o frame atual e emite UM evento de step —
+/// sem amostragem/cap aqui (o modelo de produto é trace-and-replay: grava a
+/// execução inteira; um cap de eventos é trabalho futuro separado, já
+/// rastreado em tasks.md via events::STEP_EVENT_CAP). Se a inspeção falhar
+/// (ex: sem frame gerenciado ativo, perto do fim da execução), não emite
+/// nada nesse passo mas continua avançando de qualquer forma.
 unsafe extern "C" fn cb_step_complete(
     _this: *mut c_void,
     app_domain: *mut c_void,
     thread: *mut c_void,
     _stepper: *mut c_void,
-    reason: i32,
+    _reason: i32,
 ) -> HResult {
-    STEP_COUNT += 1;
-    eprintln!(
-        "[callback] SUCESSO: StepComplete disparou! (passo {}/{}) thread={:?} reason={}",
-        STEP_COUNT, STEPS_BEFORE_INSPECT, thread, reason
-    );
-
-    if STEP_COUNT < STEPS_BEFORE_INSPECT {
-        match create_stepper(thread) {
-            Ok(stepper) => {
-                step_into(stepper);
-                continue_(app_domain);
-            }
-            Err(hr) => eprintln!("[callback]   FALHA ao criar novo stepper: hr=0x{:08x}", hr as u32),
-        }
-        return S_OK;
-    }
-
-    match get_active_frame(thread) {
-        Ok(frame) => {
-            eprintln!("[callback]   GetActiveFrame OK: {:?}", frame);
-            match query_interface(frame, &IID_ICORDEBUG_IL_FRAME) {
-                Ok(il_frame) => {
-                    eprintln!("[callback]   QueryInterface(ICorDebugILFrame) OK: {:?}", il_frame);
-                    print_call_stack(il_frame);
-                    match get_local_variable(il_frame, 0) {
-                        Ok(value) => print_local_value(value),
-                        Err(hr) => eprintln!("[callback]   GetLocalVariable(0) falhou: hr=0x{:08x}", hr as u32),
-                    }
-                }
-                Err(hr) => eprintln!("[callback]   QueryInterface(ICorDebugILFrame) falhou: hr=0x{:08x}", hr as u32),
+    if let Ok(frame) = get_active_frame(thread) {
+        if let Ok(il_frame) = query_interface(frame, &IID_ICORDEBUG_IL_FRAME) {
+            let line = get_il_offset(il_frame).map(|o| o as i64).unwrap_or(-1);
+            let stack = get_call_stack_names(il_frame);
+            let locals = extract_locals(il_frame);
+            if let Some(sink) = STEP_SINK {
+                sink(line, locals, stack);
             }
         }
-        Err(hr) => eprintln!("[callback]   GetActiveFrame falhou: hr=0x{:08x}", hr as u32),
     }
+
+    if let Ok(stepper) = create_stepper(thread) {
+        step_into(stepper);
+    }
+    continue_(app_domain);
     S_OK
 }
 
@@ -892,70 +908,70 @@ unsafe fn dereference_value(value: *mut c_void) -> Result<Option<*mut c_void>, H
     Ok(Some(dereference(ref_value)?))
 }
 
-unsafe fn print_local_value(value: *mut c_void) {
+/// Enumera as variáveis locais do frame (índice 0, 1, 2, ... até
+/// GetLocalVariable falhar — sinal de que passou do fim da lista de locals
+/// da assinatura do método). Chave é "local_N": sem PDB não há nome de
+/// variável disponível via nenhuma API COM (ver find_entry_point_token e
+/// spec.md), só índice + tipo/valor.
+pub unsafe fn extract_locals(il_frame: *mut c_void) -> BTreeMap<String, serde_json::Value> {
+    let mut locals = BTreeMap::new();
+    for i in 0..64u32 {
+        let value = match get_local_variable(il_frame, i) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        locals.insert(format!("local_{i}"), local_value_to_json(value));
+    }
+    locals
+}
+
+/// Converte um valor local pra JSON: primitivo (i32 bruto), string
+/// dereferenciada, array dereferenciado (elementos lidos como i32), ou null
+/// (referência nula ou qualquer falha na extração).
+unsafe fn local_value_to_json(value: *mut c_void) -> serde_json::Value {
     let t = get_value_type(value).unwrap_or(-1);
 
     if t == ELEMENT_TYPE_STRING {
-        match dereference_value(value) {
-            Ok(None) => eprintln!("[callback]   SUCESSO: local[0] = null (CorElementType=0x{:x})", t),
+        return match dereference_value(value) {
+            Ok(None) => serde_json::Value::Null,
             Ok(Some(dereferenced)) => match query_interface(dereferenced, &IID_ICORDEBUG_STRING_VALUE) {
                 Ok(string_value) => match get_string_value(string_value) {
-                    Ok(s) => eprintln!(
-                        "[callback]   SUCESSO: local[0] = \"{}\" (CorElementType=0x{:x}, string dereferenciada)",
-                        s, t
-                    ),
-                    Err(hr) => eprintln!("[callback]   GetString falhou: hr=0x{:08x}", hr as u32),
+                    Ok(s) => serde_json::json!(s),
+                    Err(_) => serde_json::Value::Null,
                 },
-                Err(hr) => eprintln!(
-                    "[callback]   QueryInterface(ICorDebugStringValue) falhou: hr=0x{:08x}",
-                    hr as u32
-                ),
+                Err(_) => serde_json::Value::Null,
             },
-            Err(hr) => eprintln!("[callback]   dereference (string) falhou: hr=0x{:08x}", hr as u32),
-        }
-        return;
+            Err(_) => serde_json::Value::Null,
+        };
     }
 
     if t == ELEMENT_TYPE_ARRAY || t == ELEMENT_TYPE_SZARRAY {
-        match dereference_value(value) {
-            Ok(None) => eprintln!("[callback]   SUCESSO: local[0] = null (CorElementType=0x{:x}, array)", t),
+        return match dereference_value(value) {
+            Ok(None) => serde_json::Value::Null,
             Ok(Some(dereferenced)) => match query_interface(dereferenced, &IID_ICORDEBUG_ARRAY_VALUE) {
-                Ok(array_value) => {
-                    let elem_type = get_array_element_type(array_value).unwrap_or(-1);
-                    match get_array_count(array_value) {
-                        Ok(count) => {
-                            let mut items = Vec::new();
-                            for i in 0..count {
-                                let s = match get_array_element_at(array_value, i) {
-                                    Ok(elem) => match get_value_i32(elem) {
-                                        Ok(v) => v.to_string(),
-                                        Err(_) => "?".to_string(),
-                                    },
-                                    Err(_) => "?".to_string(),
-                                };
-                                items.push(s);
-                            }
-                            eprintln!(
-                                "[callback]   SUCESSO: local[0] = [{}] (CorElementType=0x{:x}, {} elementos, tipo elemento=0x{:x})",
-                                items.join(", "), t, count, elem_type
-                            );
+                Ok(array_value) => match get_array_count(array_value) {
+                    Ok(count) => {
+                        let mut items = Vec::new();
+                        for i in 0..count {
+                            let v = match get_array_element_at(array_value, i) {
+                                Ok(elem) => get_value_i32(elem).unwrap_or(0),
+                                Err(_) => 0,
+                            };
+                            items.push(v);
                         }
-                        Err(hr) => eprintln!("[callback]   GetCount falhou: hr=0x{:08x}", hr as u32),
+                        serde_json::json!(items)
                     }
-                }
-                Err(hr) => eprintln!(
-                    "[callback]   QueryInterface(ICorDebugArrayValue) falhou: hr=0x{:08x}",
-                    hr as u32
-                ),
+                    Err(_) => serde_json::Value::Null,
+                },
+                Err(_) => serde_json::Value::Null,
             },
-            Err(hr) => eprintln!("[callback]   dereference (array) falhou: hr=0x{:08x}", hr as u32),
-        }
-        return;
+            Err(_) => serde_json::Value::Null,
+        };
     }
 
     match get_value_i32(value) {
-        Ok(v) => eprintln!("[callback]   SUCESSO: local[0] = {} (CorElementType=0x{:x})", v, t),
-        Err(hr) => eprintln!("[callback]   local[0] tipo=0x{:x}, GetValue falhou: hr=0x{:08x}", t, hr as u32),
+        Ok(v) => serde_json::json!(v),
+        Err(_) => serde_json::Value::Null,
     }
 }
 
@@ -999,6 +1015,7 @@ unsafe extern "C" fn cb_create_process(_this: *mut c_void, process: *mut c_void)
 
 unsafe extern "C" fn cb_exit_process(_this: *mut c_void, process: *mut c_void) -> HResult {
     eprintln!("[callback] ExitProcess! process={:?}", process);
+    PROCESS_EXITED = true;
     S_OK
 }
 
@@ -1037,15 +1054,20 @@ unsafe extern "C" fn cb_load_module(
                                     eprintln!("[callback]   GetFunctionFromToken OK: {:?}", func);
                                     match create_function_breakpoint(func) {
                                         Ok(bp) => eprintln!("[callback]   SUCESSO: breakpoint criado! {:?}", bp),
-                                        Err(hr) => eprintln!("[callback]   FALHA ao criar breakpoint: hr=0x{:08x}", hr as u32),
+                                        Err(hr) => report_error(format!(
+                                            "falha ao criar breakpoint no método de entrada: hr=0x{:08x}",
+                                            hr as u32
+                                        )),
                                     }
                                 }
-                                Err(hr) => eprintln!("[callback]   FALHA GetFunctionFromToken: hr=0x{:08x}", hr as u32),
+                                Err(hr) => report_error(format!("GetFunctionFromToken falhou: hr=0x{:08x}", hr as u32)),
                             }
                         }
-                        None => eprintln!("[callback]   FALHA: não achou método 'Main'/'<Main>$' entre os tipos/métodos da assembly"),
+                        None => report_error(
+                            "não achou método de entrada ('Main' ou '<Main>$') na assembly do usuário".to_string(),
+                        ),
                     },
-                    Err(hr) => eprintln!("[callback]   FALHA GetMetaDataInterface: hr=0x{:08x}", hr as u32),
+                    Err(hr) => report_error(format!("GetMetaDataInterface falhou: hr=0x{:08x}", hr as u32)),
                 }
             }
         }

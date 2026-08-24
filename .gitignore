@@ -1,0 +1,19 @@
+# Rust (qualquer crate no monorepo: sandbox/, static-analyzer/, etc.)
+target/
+
+# .NET
+bin/
+obj/
+outdebug/
+out/
+
+# Node/frontend (quando existir)
+node_modules/
+dist/
+
+# Editores/SO
+.DS_Store
+*.swp
+
+# Logs/artefatos de depuração locais
+*.log

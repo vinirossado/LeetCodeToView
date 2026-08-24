@@ -5,6 +5,16 @@ edition = "2021"
 
 [dependencies]
 libloading = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "sandbox_runner_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sandbox-runner"
+path = "src/bin/sandbox_runner.rs"
 
 [[bin]]
 name = "sandbox-spike"

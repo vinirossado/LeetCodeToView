@@ -97,6 +97,8 @@ Exemplo:
 
 Outros tipos de evento: `timeout`, `memory_limit_exceeded`, `output_truncated`, `stack_overflow`, `step_limit_exceeded` (execução passou do cap de linhas steppadas — ver "Throttling de eventos e escopo de tamanho de execução").
 
+> **Assimetria conhecida entre Java e C# no campo `locals` (pós-unificação Fase 0.5):** o schema do evento (`type`, `line`, `locals`, `stack`, `time_ns`, `memory_bytes`) é idêntico nas duas linguagens — mesmo `enum` Rust (`sandbox/src/events.rs`) emite os dois. Mas o **conteúdo das chaves de `locals` difere**: Java (via JDI) resolve o nome real da variável (`"x"`, `"i"`) porque a JVM carrega essa informação de debug nativamente. C# (via ICorDebug direto, sem netcoredbg) ainda usa chaves posicionais (`"local_0"`, `"local_1"`) porque mapear índice→nome exige ler o Portable PDB, e isso foi investigado e propositalmente adiado (ver seção "Estratégia C#" — não existe symbol reader nativo no SDK do .NET, exigiria escrever um parser de Portable PDB do zero). O frontend precisa tratar isso como diferença **interina e conhecida**, não bug: para C#, exibir `local_N` (com fallback pro índice) até o parser de PDB ser implementado (backlog, não MVP).
+
 ### Recuperar trace completo
 
 `GET /executions/b3f1c2a4-6e9d-4a2b-9f3e-1d7c8a0b5f6e/trace`
