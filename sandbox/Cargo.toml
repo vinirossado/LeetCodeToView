@@ -1,0 +1,15 @@
+[package]
+name = "sandbox-spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libloading = "0.8"
+
+[[bin]]
+name = "sandbox-spike"
+path = "src/main.rs"
+
+[[bin]]
+name = "icordebug-spike"
+path = "src/icordebug_spike.rs"
