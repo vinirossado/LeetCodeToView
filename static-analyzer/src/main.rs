@@ -1,21 +1,52 @@
+mod csharp_adapter;
 mod engine;
 mod ir;
 mod java_adapter;
 
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process::ExitCode;
+
+/// Language is picked from the file extension (`.java` vs `.cs`) — the CLI is
+/// already invoked with a source file path, so this needs no new flag and stays
+/// consistent with how the API's `ProcessStaticAnalyzer` will eventually invoke it
+/// (it already receives a `language` string per request, so mapping that to an
+/// extension when writing the temp file is a one-line concern on that side, not
+/// here).
+enum Language {
+    Java,
+    CSharp,
+}
+
+fn detect_language(path: &str) -> Result<Language, String> {
+    match Path::new(path).extension().and_then(|e| e.to_str()) {
+        Some("java") => Ok(Language::Java),
+        Some("cs") => Ok(Language::CSharp),
+        other => Err(format!(
+            "extensão de arquivo não reconhecida ({other:?}); use .java ou .cs"
+        )),
+    }
+}
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let path = match args.next() {
         Some(p) => p,
         None => {
-            eprintln!("uso: static-analyzer <arquivo.java> [--json]");
+            eprintln!("uso: static-analyzer <arquivo.java|arquivo.cs> [--json]");
             return ExitCode::FAILURE;
         }
     };
     let json_output = args.any(|a| a == "--json");
+
+    let language = match detect_language(&path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let source = match fs::read_to_string(&path) {
         Ok(s) => s,
@@ -25,7 +56,12 @@ fn main() -> ExitCode {
         }
     };
 
-    let complexity_ir = match java_adapter::parse_java(&source, &path) {
+    let parse_result = match language {
+        Language::Java => java_adapter::parse_java(&source, &path),
+        Language::CSharp => csharp_adapter::parse_csharp(&source, &path),
+    };
+
+    let complexity_ir = match parse_result {
         Ok(ir) => ir,
         Err(e) => {
             eprintln!("erro analisando '{path}': {e}");

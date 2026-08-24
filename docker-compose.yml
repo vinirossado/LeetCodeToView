@@ -4,12 +4,17 @@
 # container (see Dockerfile.api for why: no real IPC contract between API
 # and Sandbox Controller yet, ProcessSandboxRunner/ProcessStaticAnalyzer
 # shell out to local binaries). It needs nsjail's namespace/cgroup
-# privileges to actually sandbox anything — `privileged: true` mirrors what
-# was needed in this project's own Fase 0.5 spike testing (see tasks.md
-# "Achado de ambiente... Docker Desktop"); this is broader than nsjail
-# strictly needs and is NOT meant to be how this runs in production; the
-# `.ci/` deploy path should scope this down (or move nsjail's capabilities
-# to the real Sandbox Controller service once that split exists).
+# privileges to actually sandbox anything — `privileged: true` + `cgroup:
+# host` mirror what was needed in this project's own Fase 0.5 spike testing
+# (see tasks.md "Achado de ambiente... Docker Desktop"): nsjail needs the
+# HOST's root cgroupv2 hierarchy to set up its own delegated cgroup, which
+# `--cgroupns=host` (this field's compose equivalent) provides — without
+# it nsjail fails with "Couldn't write to cgroup.subtree_control: Device or
+# resource busy", reproduced empirically running this exact compose file.
+# This is broader than nsjail strictly needs and is NOT meant to be how
+# this runs in production; the `.ci/` deploy path should scope this down
+# (or move nsjail's capabilities to the real Sandbox Controller service
+# once that split exists).
 services:
   api:
     build:
@@ -18,6 +23,7 @@ services:
     ports:
       - "8080:8080"
     privileged: true
+    cgroup: host
     environment:
       - DOTNET_GCHeapHardLimit=0x8000000
 

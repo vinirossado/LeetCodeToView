@@ -39,6 +39,20 @@ RUN curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
 ENV PATH="/usr/share/dotnet:${PATH}"
 ENV DOTNET_ROOT="/usr/share/dotnet"
 
+# netcoredbg provides libdbgshim.so, which csharp.rs's ICorDebug worker
+# dlopens directly (LIBDBGSHIM_PATH) — netcoredbg itself (the DAP debugger)
+# is unused in production (abandoned for a direct ICorDebug interop, see
+# spec.md "Estratégia C#"), only this one shared library from its release
+# tarball is needed. Missing this entirely (as an earlier version of this
+# file did) fails every C# execution with "cannot open shared object file"
+# — found by actually running a C# execution against this image, not by
+# inspection. linux-arm64 build, matching sandbox/Dockerfile's existing
+# pin — same portability caveat applies (not verified on amd64 hosts).
+RUN curl -sSL https://github.com/Samsung/netcoredbg/releases/download/3.0.0-1006/netcoredbg-linux-arm64.tar.gz -o /tmp/netcoredbg.tar.gz \
+    && mkdir -p /usr/share/netcoredbg \
+    && tar -xzf /tmp/netcoredbg.tar.gz -C /usr/share/netcoredbg \
+    && rm /tmp/netcoredbg.tar.gz
+
 # nsjail has no apt package — build from source
 RUN git clone --depth 1 https://github.com/google/nsjail.git /tmp/nsjail \
     && cd /tmp/nsjail && make \
@@ -55,11 +69,17 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Quarkus is launched with an explicit JAVA_HOME instead of touching PATH.
 # Installed via Eclipse Temurin's own apt repo (verified reachable), not a
 # guessed tarball URL.
+# The install dir is architecture-suffixed (temurin-25-jdk-amd64 vs
+# -arm64) and differs depending on the build host/platform — symlinked to
+# a stable, arch-independent path instead of hardcoding one arch (found by
+# actually building this on an arm64 host, where a hardcoded "-amd64" path
+# doesn't exist and JAVA_HOME silently points nowhere).
 RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" > /etc/apt/sources.list.d/adoptium.list \
     && apt-get update && apt-get install -y --no-install-recommends temurin-25-jdk \
-    && rm -rf /var/lib/apt/lists/*
-ENV JDK25_HOME="/usr/lib/jvm/temurin-25-jdk-amd64"
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/lib/jvm/temurin-25-jdk-* /usr/lib/jvm/jdk-25
+ENV JDK25_HOME="/usr/lib/jvm/jdk-25"
 
 # ─── Build sandbox-runner + jdi Debugger ──────────────────────────────────
 FROM toolchain AS sandbox-build
