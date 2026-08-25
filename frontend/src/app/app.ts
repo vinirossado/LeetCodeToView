@@ -45,6 +45,16 @@ const LAST_EXECUTION_ID_KEY = 'code2complexity.lastExecutionId';
  */
 const SHARE_EXECUTION_QUERY_PARAM = 'execution';
 
+/**
+ * Exact error text the API returns for a 404 on GET /executions/:id/trace
+ * (see `ErrorResponse("execution not found")` in
+ * api/src/main/java/.../web/ExecutionsResource.java). Used to recognize
+ * specifically "this execution genuinely no longer exists" (as opposed to
+ * some other, transient error) so the boot-time self-heal below only fires
+ * for that one case — see the field doc on `awaitingLastIdLoadOutcome`.
+ */
+const EXECUTION_NOT_FOUND_ERROR_MESSAGE = 'execution not found';
+
 /** localStorage key persisting the user's chosen editor/panels split ratio. */
 const SPLIT_RATIO_KEY = 'code2complexity.splitRatio';
 
@@ -135,6 +145,16 @@ export class App {
   // toggling it doesn't cause a spurious extra run.
   private suppressNextPersist = false;
 
+  // True while waiting for the outcome of the ONE boot-time load triggered
+  // by a persisted LAST_EXECUTION_ID_KEY (the "reconnect after refresh"
+  // fallback, see the constructor). Consumed (set back to false) the
+  // moment that load settles, whether it succeeds or fails — see the
+  // self-heal effect below. Deliberately a plain field, not a signal, for
+  // the exact same reason as suppressNextPersist above: the effect that
+  // consumes it also needs to write it, and a tracked read would
+  // re-schedule that same effect and defeat the one-shot check.
+  private awaitingLastIdLoadOutcome = false;
+
   // Execution/session state, re-exposed as plain signals for the template.
   readonly executionId = this.session.executionId;
   readonly runError = this.session.runError;
@@ -187,6 +207,7 @@ export class App {
       this.suppressNextPersist = true;
       this.session.load(sharedId);
     } else if (lastId) {
+      this.awaitingLastIdLoadOutcome = true;
       this.session.load(lastId);
     }
 
@@ -202,6 +223,29 @@ export class App {
       }
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(LAST_EXECUTION_ID_KEY, id);
+      }
+    });
+
+    // Self-heals a stale LAST_EXECUTION_ID_KEY: if the boot-time reconnect
+    // load above comes back 404 "execution not found" (most commonly
+    // because the API's in-memory ExecutionStore was reset since this id
+    // was saved — e.g. an `api` container restart/rebuild), the id is
+    // wiped from localStorage so the NEXT page load starts clean instead
+    // of showing this same error on every future visit until someone
+    // manually clears localStorage. Gated on `isBusy()` going back to
+    // false rather than on `runError()` alone, so this only fires once the
+    // load has actually settled (success OR failure) — reading `runError()`
+    // while the request is still in flight would consume the one-shot flag
+    // on its still-null initial value. Narrowed to the exact
+    // EXECUTION_NOT_FOUND_ERROR_MESSAGE (not "any error") so a transient
+    // failure (network hiccup, API down) does not throw away a resume id
+    // that may still be perfectly valid.
+    effect(() => {
+      const busy = this.isBusy();
+      if (busy || !this.awaitingLastIdLoadOutcome) return;
+      this.awaitingLastIdLoadOutcome = false; // one-shot: only the boot-time lastId load
+      if (this.runError() === EXECUTION_NOT_FOUND_ERROR_MESSAGE && typeof localStorage !== 'undefined') {
+        localStorage.removeItem(LAST_EXECUTION_ID_KEY);
       }
     });
   }

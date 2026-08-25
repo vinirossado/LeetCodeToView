@@ -2,6 +2,7 @@ mod csharp_adapter;
 mod engine;
 mod ir;
 mod java_adapter;
+mod ruby_adapter;
 
 use std::env;
 use std::fs;
@@ -17,14 +18,16 @@ use std::process::ExitCode;
 enum Language {
     Java,
     CSharp,
+    Ruby,
 }
 
 fn detect_language(path: &str) -> Result<Language, String> {
     match Path::new(path).extension().and_then(|e| e.to_str()) {
         Some("java") => Ok(Language::Java),
         Some("cs") => Ok(Language::CSharp),
+        Some("rb") => Ok(Language::Ruby),
         other => Err(format!(
-            "extensão de arquivo não reconhecida ({other:?}); use .java ou .cs"
+            "extensão de arquivo não reconhecida ({other:?}); use .java, .cs ou .rb"
         )),
     }
 }
@@ -34,7 +37,7 @@ fn main() -> ExitCode {
     let path = match args.next() {
         Some(p) => p,
         None => {
-            eprintln!("uso: static-analyzer <arquivo.java|arquivo.cs> [--json]");
+            eprintln!("uso: static-analyzer <arquivo.java|arquivo.cs|arquivo.rb> [--json]");
             return ExitCode::FAILURE;
         }
     };
@@ -59,6 +62,7 @@ fn main() -> ExitCode {
     let parse_result = match language {
         Language::Java => java_adapter::parse_java(&source, &path),
         Language::CSharp => csharp_adapter::parse_csharp(&source, &path),
+        Language::Ruby => ruby_adapter::parse_ruby(&source, &path),
     };
 
     let complexity_ir = match parse_result {

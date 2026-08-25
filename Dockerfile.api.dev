@@ -120,6 +120,24 @@ WORKDIR /build/static-analyzer
 COPY static-analyzer/ .
 RUN cargo build --release && cp target/release/static-analyzer /app/static-analyzer
 
+# ─── minimal, isolated rootfs per sandboxed language ──────────────────────
+# Bug found this session: this Dockerfile never had this step at all, so
+# `docker compose -f docker-compose.dev.yml up` built an image where
+# java.rs/csharp.rs's hardcoded --chroot targets (/opt/sandbox-rootfs/java,
+# /opt/sandbox-rootfs/csharp) never existed, and every Java execution failed
+# with `mount('/opt/sandbox-rootfs/java' -> '/tmp/nsjail.0.root//'): No such
+# file or directory` -- confirmed empirically running this exact dev stack.
+# Dockerfile.api's own comment on its equivalent step claims this dev
+# Dockerfile was "kept in sync" when the minimal-rootfs work landed; it
+# wasn't, for this one step. Same script, same invocation, same placement
+# (after the sandbox-runner/jdi-driver artifacts it stages exist at /app/...,
+# see Dockerfile.api's own comment on this same RUN for the full rationale)
+# -- static-analyzer isn't referenced by the script, so ordering relative to
+# the block above doesn't matter, but it's kept after both artifact-producing
+# blocks for the same "reads already-built artifacts" reasoning.
+COPY sandbox/build-minimal-rootfs.sh /tmp/build-minimal-rootfs.sh
+RUN bash /tmp/build-minimal-rootfs.sh /opt/sandbox-rootfs && rm /tmp/build-minimal-rootfs.sh
+
 # ─── api: pre-warm the Maven dependency cache only ────────────────────────
 # api/src is intentionally NOT copied here — it's bind-mounted at runtime
 # (docker-compose.dev.yml) so edits are visible without a rebuild. Copying

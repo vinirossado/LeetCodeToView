@@ -164,6 +164,26 @@ describe('App', () => {
     expect(fixture.componentInstance.totalSteps()).toBe(2);
   });
 
+  it('a stale persisted execution id (404 "execution not found") is cleared from localStorage, so a future reload does not repeat the same error forever', () => {
+    localStorage.setItem('code2complexity.lastExecutionId', 'exec-gone');
+    const fixture = create();
+    getTrace$.error(new HttpErrorResponse({ status: 404, error: { error: 'execution not found' } }));
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.runError()).toContain('execution not found');
+    expect(localStorage.getItem('code2complexity.lastExecutionId')).toBeNull();
+  });
+
+  it('a transient (non-404) error loading the persisted execution id does NOT clear it, since the execution may still be perfectly valid', () => {
+    localStorage.setItem('code2complexity.lastExecutionId', 'exec-transient');
+    const fixture = create();
+    getTrace$.error(new HttpErrorResponse({ status: 500, error: { error: 'internal server error' } }));
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.runError()).toBeTruthy();
+    expect(localStorage.getItem('code2complexity.lastExecutionId')).toBe('exec-transient');
+  });
+
   describe('shared execution links (?execution=<id>)', () => {
     it('on init, a ?execution=<id> query param loads that execution via GET /trace', () => {
       window.history.pushState({}, '', '/?execution=exec-shared');

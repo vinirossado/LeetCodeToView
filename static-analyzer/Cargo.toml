@@ -7,6 +7,16 @@ edition = "2021"
 tree-sitter = "0.24"
 tree-sitter-java = "0.23"
 tree-sitter-c-sharp = "=0.23.1"
+# tree-sitter-ruby's crates.io history only goes up to 0.23.1 (checked the sparse
+# index directly: 0.20.0, 0.20.1, 0.21.0, 0.23.0, 0.23.1 — no 0.23.2+ exists yet,
+# unlike tree-sitter-c-sharp which had a newer 0.23.5 that generated an
+# ABI-15 parser incompatible with this project's `tree-sitter = "0.24"` runtime
+# (ABI 14) — see csharp_adapter.rs's module doc comment for that finding. Since
+# 0.23.1 is already the newest release, an unpinned "0.23" and the exact pin
+# resolve to the same thing; pinned anyway for the same future-proofing rationale
+# as tree-sitter-c-sharp (confirmed empirically below that 0.23.1 IS ABI-14
+# compatible, not assumed just because no newer version exists yet).
+tree-sitter-ruby = "=0.23.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

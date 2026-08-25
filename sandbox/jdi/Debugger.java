@@ -23,6 +23,25 @@ public class Debugger {
     static final int MAX_DEPTH = 3;
     static final int MAX_ARRAY_ELEMENTS = 20;
     static final int MAX_FIELDS = 20;
+    // Cap on the number of frame names serialized into a `stack` array per
+    // step event. Needed ONLY after switching stepping from STEP_OVER to
+    // STEP_INTO (see the StepRequest.STEP_INTO comment below): under
+    // STEP_OVER, `stack` was always exactly 1 frame deep (the stepper never
+    // entered a called method), so no cap was ever needed. Under STEP_INTO,
+    // a deeply recursive program's `stack` grows one frame per recursive
+    // call -- and since every SINGLE step event serializes the FULL stack
+    // again, total emitted bytes grow QUADRATICALLY with recursion depth
+    // (~stack_depth^2/2 bytes across the whole trace). Confirmed empirically
+    // running test-snippets/DeepRecursion.java through the real API after
+    // the STEP_INTO switch: ~1438 step events (each with a stack up to 1438
+    // frames deep) blew through sandbox-runner's 10MB total-stdout cap
+    // (events::OUTPUT_BYTE_CAP) mid-line, corrupting the final JSON line so
+    // the clean `{"type":"output_truncated"}` marker never parsed as JSON
+    // and the execution surfaced as a generic "internal sandbox error"
+    // instead of a clean terminal event. Same cap style as
+    // MAX_ARRAY_ELEMENTS/MAX_FIELDS above (truncate + say how much was
+    // omitted, don't just silently drop data).
+    static final int MAX_STACK_FRAMES = 50;
 
     // memory_bytes instrumentation toggle (mirrors spike.suspend/
     // spike.skipdata/spike.sample above). Defaults to ON when the property
@@ -174,9 +193,20 @@ public class Debugger {
                     if (readMem) {
                         initMemoryProbe(vm, mainThread[0]);
                     }
+                    // STEP_INTO (not STEP_OVER): with STEP_OVER, the stepper never
+                    // actually enters a called method's frames, so thread.frames()
+                    // below always reported just the current single frame (e.g.
+                    // ["main"]) no matter how deep the user's real call chain went —
+                    // this was the direct cause of the call stack never showing more
+                    // than one frame for Java (confirmed empirically: a recursive
+                    // program's `stack` array never grew past size 1 under
+                    // STEP_OVER). The class-exclusion filters below already keep
+                    // STEP_INTO from diving into JVM-internal code (java.*/jdk.*/
+                    // sun.*), which is what makes STEP_INTO usable here instead of
+                    // drowning in JDK-internal steps.
                     StepRequest stepReq = erm.createStepRequest(
                             ((BreakpointEvent) event).thread(),
-                            StepRequest.STEP_LINE, StepRequest.STEP_OVER);
+                            StepRequest.STEP_LINE, StepRequest.STEP_INTO);
                     stepReq.addClassExclusionFilter("java.*");
                     stepReq.addClassExclusionFilter("jdk.*");
                     stepReq.addClassExclusionFilter("sun.*");
@@ -472,11 +502,19 @@ public class Debugger {
             }
             locals.append('}');
 
+            // Innermost frames first (frames.get(0) is the current frame, same
+            // order thread.frames() already returns) -- capped at
+            // MAX_STACK_FRAMES so a deeply recursive program doesn't blow up
+            // per-event size (see MAX_STACK_FRAMES's doc comment above).
             StringBuilder stack = new StringBuilder("[");
             List<StackFrame> frames = thread.frames();
-            for (int i = 0; i < frames.size(); i++) {
+            int frameCount = Math.min(frames.size(), MAX_STACK_FRAMES);
+            for (int i = 0; i < frameCount; i++) {
                 if (i > 0) stack.append(',');
                 stack.append('"').append(frames.get(i).location().method().name()).append('"');
+            }
+            if (frames.size() > MAX_STACK_FRAMES) {
+                stack.append(",\"...(+").append(frames.size() - MAX_STACK_FRAMES).append(" frames)\"");
             }
             stack.append(']');
 

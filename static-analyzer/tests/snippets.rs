@@ -68,6 +68,11 @@ fn csharp_snippets_produce_valid_json() {
     run_on_all_snippets_in("test-snippets-csharp");
 }
 
+#[test]
+fn ruby_snippets_produce_valid_json() {
+    run_on_all_snippets_in("test-snippets-ruby");
+}
+
 /// Unlike the smoke tests above (deliberately loose, don't pin exact Big-O),
 /// this DOES assert an exact classification — binary search is common and
 /// specific enough a regression here (e.g. someone tightening
@@ -107,4 +112,15 @@ fn java_binary_search_is_classified_logarithmic() {
 #[test]
 fn csharp_binary_search_is_classified_logarithmic() {
     assert_method_is_logarithmic("test-snippets-csharp", "BinarySearch.cs", "Search");
+}
+
+/// Ruby's `while`/`until` grammar shape (see `ruby_adapter.rs`'s
+/// `is_binary_search_idiom`) DOES support the same two-bound-narrowing detection
+/// as Java/C# — confirmed by running the compiled binary against
+/// `test-snippets-ruby/BinarySearch.rb` by hand before writing this assertion
+/// (`cargo run --bin static-analyzer -- test-snippets-ruby/BinarySearch.rb --json`
+/// really does print `"time": "Logarithmic"`, not guessed).
+#[test]
+fn ruby_binary_search_is_classified_logarithmic() {
+    assert_method_is_logarithmic("test-snippets-ruby", "BinarySearch.rb", "binary_search");
 }
