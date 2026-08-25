@@ -29,6 +29,7 @@ const STARTER_CODE: Record<Language, string> = {
   csharp: ['int n = 5;', 'int total = 0;', 'for (int i = 0; i < n; i++) {', '    total += i;', '    Console.WriteLine(total);', '}'].join(
     '\n',
   ),
+  ruby: ['n = 5', 'total = 0', 'i = 0', 'while i < n', '  total += i', '  puts total', '  i += 1', 'end'].join('\n'),
 };
 
 /** localStorage key for the reload/reconnect fallback (spec.md "Reconexão"). */

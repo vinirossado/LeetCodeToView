@@ -55,12 +55,49 @@ class ProcessStaticAnalyzerTest {
         assertEquals("Linear", result.get(0).get("time").asText());
     }
 
+    // Added alongside the "ruby" -> "rb" EXTENSIONS entry (see
+    // ProcessStaticAnalyzer): before that entry existed, "ruby" was this
+    // test class's own stand-in for "an unsupported language" (see
+    // rejectsUnsupportedLanguage below, which used to pass `"ruby"` before
+    // this task made it a genuinely supported one and had to be moved to
+    // "python" instead) — this test now covers the real, newly-wired path
+    // static-analyzer/src/ruby_adapter.rs already implemented and validated
+    // on its own terms (see tasks.md "Adaptador AST (Ruby)"), same shape as
+    // analyzesJavaCode/analyzesCsharpCode above.
+    @Test
+    void analyzesRubyCode() throws Exception {
+        // Wrapped in a `def`, not top-level statements — ruby_adapter.rs
+        // deliberately does NOT classify top-level code the way the C#
+        // adapter does for top-level-statement programs (see tasks.md
+        // "Decisão consciente de NÃO replicar o suporte a 'top-level
+        // statements' do C#"): a bare `arr.each { ... }` with no enclosing
+        // method produces zero method entries, found the hard way here
+        // first (assertEquals(1, ...) failed with 0 before adding the
+        // `def`).
+        JsonNode result = newAnalyzer().analyze("ruby", """
+                def sum(arr)
+                    total = 0
+                    arr.each { |x| total += x }
+                    total
+                end
+                """);
+
+        assertEquals(1, result.size());
+        assertEquals("Linear", result.get(0).get("time").asText());
+    }
+
     @Test
     void rejectsUnsupportedLanguage() {
+        // "python" here, not "ruby" — "ruby" used to be this test's
+        // stand-in for "unsupported" before this task wired it up for
+        // real (see analyzesRubyCode above and ProcessStaticAnalyzer's
+        // EXTENSIONS map) — found breaking exactly here when this task's
+        // change made this assertion start failing for a real reason
+        // ("nothing was thrown"), not a false positive to paper over.
         StaticAnalyzer.UnsupportedLanguageException ex = assertThrows(
                 StaticAnalyzer.UnsupportedLanguageException.class,
-                () -> newAnalyzer().analyze("ruby", "puts 1"));
+                () -> newAnalyzer().analyze("python", "print(1)"));
 
-        assertTrue(ex.getMessage().contains("ruby"));
+        assertTrue(ex.getMessage().contains("python"));
     }
 }

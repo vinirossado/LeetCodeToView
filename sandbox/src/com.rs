@@ -65,6 +65,31 @@ pub static mut LOCAL_NAME_RESOLVER: Option<fn(u32, u32) -> BTreeMap<u32, String>
 // established for local_N names, just applied to the other half of the
 // event schema.
 pub static mut LINE_RESOLVER: Option<fn(u32, u32) -> Option<u32>> = None;
+// Same indirection/lifecycle as LINE_RESOLVER immediately above, one level
+// more specific: maps (method token, current IL offset) -> the half-open IL
+// range `[start, end)` of the SEQUENCE POINT covering that offset — i.e.
+// the exact source line's IL extent, per pdb.rs::PortablePdb::step_range_for
+// (built on the same SequencePoints data LINE_RESOLVER already reads, just
+// returning the covering point's range instead of only its line number).
+// `None` (no PDB, method has no sequence point data, offset is inside a
+// "hidden" compiler-generated region, or the resolver itself isn't set —
+// e.g. icordebug-spike, which never sets it) means "can't compute a
+// meaningful line range here" — `arm_step` below then falls back to plain
+// per-IL-instruction `Step`, same fallback philosophy as LINE_RESOLVER's own
+// None case. Set once from csharp::run_worker (see that file), from the same
+// loaded PortablePdb LINE_RESOLVER/LOCAL_NAME_RESOLVER already use.
+//
+// This is the actual fix for the "same line highlighted N times in a row"
+// UX problem (see tasks.md): `ICorDebugStepper::StepRange` — unlike plain
+// `Step`, which always completes at the very next IL instruction regardless
+// of source line — does not fire StepComplete until execution leaves the
+// given IL range, so arming it with the CURRENT line's full IL range
+// produces exactly one StepComplete per SOURCE LINE, mirroring what JDI's
+// `StepRequest.STEP_LINE` already gives Java for free (see cordebug.idl's
+// own doc comment on StepRange, verified against the real dotnet/runtime
+// source before writing this, same "don't guess the ABI" rule pdb.rs's
+// SequencePoints parsing already followed).
+pub static mut STEP_RANGE_RESOLVER: Option<fn(u32, u32) -> Option<(u32, u32)>> = None;
 
 // Multi-thread event model decision (spec.md "Multi-thread", pending since
 // Fase 1): blocked in the MVP, same choice made for Java (jdi/Debugger.java)
@@ -186,6 +211,20 @@ pub const IID_ICORDEBUG_STRING_VALUE: Guid =
     guid!(0xCC7BCAFD, 0x8A68, 0x11D2, 0x98, 0x3C, 0x00, 0x00, 0xF8, 0x08, 0x34, 0x2D);
 pub const IID_ICORDEBUG_ARRAY_VALUE: Guid =
     guid!(0x0405B0DF, 0xA660, 0x11D2, 0xBD, 0x02, 0x00, 0x00, 0xF8, 0x08, 0x49, 0xBD);
+// IIDs de ICorDebugModule2/ICorDebugStepper2, confirmadas direto do
+// cordebug.idl fonte (dotnet/runtime, buscado via `curl` antes de escrever
+// qualquer código — mesma disciplina das outras IIDs acima), usadas pra
+// habilitar Just My Code (JMC): sem isso, o stepper de instrução única
+// (`step_into`) entra em TODO o subgrafo de chamadas de código de framework
+// (ex: a inicialização preguiçosa de `Console.WriteLine` na primeira
+// chamada), inundando o trace com dezenas/centenas de eventos internos do
+// BCL antes de voltar pro código do usuário — ver doc comment em
+// `create_stepper`/`set_module_jmc_status` abaixo pro problema real
+// encontrado rodando isso de verdade.
+pub const IID_ICORDEBUG_MODULE2: Guid =
+    guid!(0x7FCC5FB5, 0x49C0, 0x41DE, 0x99, 0x38, 0x3B, 0x88, 0xB5, 0xB9, 0xAD, 0xD7);
+pub const IID_ICORDEBUG_STEPPER2: Guid =
+    guid!(0xC5B6E9C3, 0xE7D1, 0x4A8E, 0x87, 0x3B, 0x7F, 0x04, 0x7F, 0x07, 0x06, 0xF7);
 
 // --- IUnknown ---
 
@@ -344,6 +383,55 @@ pub unsafe fn get_module_name(module: *mut c_void) -> Result<String, HResult> {
     Ok(String::from_utf16_lossy(&buf[..len.min(buf.len())]))
 }
 
+// --- ICorDebugModule2 (extensão de ICorDebugModule, só o slot de JMC) ---
+
+#[repr(C)]
+pub struct Module2Vtbl {
+    pub query_interface: unsafe extern "C" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HResult,
+    pub add_ref: unsafe extern "C" fn(*mut c_void) -> u32,
+    pub release: unsafe extern "C" fn(*mut c_void) -> u32,
+    pub set_jmc_status:
+        unsafe extern "C" fn(*mut c_void, i32, u32, *const u32) -> HResult, // bIsJustMyCode, cTokens, pTokens
+}
+
+/// Marca TODAS as funções do módulo como Just My Code (`bIsJustMyCode=TRUE`)
+/// ou não (`FALSE`) numa única chamada (`ICorDebugModule2::SetJMCStatus`,
+/// `cTokens=0`/`pTokens=NULL` — "erase all previous JMC settings in this
+/// module" pro módulo inteiro, sem exceções por token). Chamado em
+/// `cb_load_module` pra TODO módulo que carrega, não só o do usuário:
+/// setar explicitamente FALSE nos módulos de framework (em vez de confiar
+/// no valor padrão do runtime pra módulos sem PDB correspondente) deixa o
+/// comportamento determinístico e documentado, não dependente de uma
+/// suposição não verificada sobre o CoreCLR.
+///
+/// Não fatal se falhar (`ICorDebugModule2` pode não existir em runtimes
+/// muito antigos, ou `SetJMCStatus(TRUE, ...)` pode devolver
+/// `CORDBG_E_FUNCTION_NOT_DEBUGGABLE` se alguma função do módulo do usuário
+/// não tiver info de debug) — só loga, não aborta a sessão: JMC é uma
+/// otimização de quais frames o stepper para, não uma correção de
+/// resolução de linha/nome (essas continuam gated por `USER_MODULE`,
+/// independente de JMC ter funcionado ou não).
+pub unsafe fn set_module_jmc_status(module: *mut c_void, is_just_my_code: bool) {
+    match query_interface(module, &IID_ICORDEBUG_MODULE2) {
+        Ok(module2) => {
+            let vtbl = *(module2 as *const *const Module2Vtbl);
+            let hr = ((*vtbl).set_jmc_status)(module2, is_just_my_code as i32, 0, std::ptr::null());
+            if hr != S_OK {
+                eprintln!(
+                    "[jmc] ICorDebugModule2::SetJMCStatus({}) módulo={:?} -> hr=0x{:08x}",
+                    is_just_my_code, module, hr as u32
+                );
+            }
+        }
+        Err(hr) => {
+            eprintln!(
+                "[jmc] QueryInterface(ICorDebugModule2) falhou pra módulo={:?} -> hr=0x{:08x}",
+                module, hr as u32
+            );
+        }
+    }
+}
+
 pub unsafe fn get_function_from_token(module: *mut c_void, token: u32) -> Result<*mut c_void, HResult> {
     let vtbl = *(module as *const *const ModuleVtbl);
     let mut func: *mut c_void = std::ptr::null_mut();
@@ -427,14 +515,74 @@ pub struct ThreadVtbl {
     pub get_active_frame: unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> HResult,
 }
 
+/// Cria um stepper novo E já habilita JMC nele (`ICorDebugStepper2::SetJMC`,
+/// ver doc comment das IIDs acima pro problema real que isso resolve).
+/// Centralizado aqui (em vez de cada call site chamar `SetJMC` depois) pra
+/// garantir que NENHUM caminho de criação de stepper esqueça de habilitar
+/// JMC — os dois call sites existentes (`cb_breakpoint`, primeiro stepper da
+/// sessão, e `cb_step_complete`, que re-arma um novo stepper a cada
+/// `StepComplete`) chamam só `create_stepper`, sem saber de JMC.
+///
+/// Não fatal se `QueryInterface(ICorDebugStepper2)`/`SetJMC` falhar: nesse
+/// caso o stepper simplesmente se comporta como antes desta mudança
+/// (instrução-a-instrução em TUDO, inclusive framework) — pior desempenho,
+/// não um crash ou comportamento incorreto.
 pub unsafe fn create_stepper(thread: *mut c_void) -> Result<*mut c_void, HResult> {
     let vtbl = *(thread as *const *const ThreadVtbl);
     let mut stepper: *mut c_void = std::ptr::null_mut();
     let hr = ((*vtbl).create_stepper)(thread, &mut stepper);
     if hr == S_OK {
+        set_stepper_jmc(stepper);
         Ok(stepper)
     } else {
         Err(hr)
+    }
+}
+
+#[repr(C)]
+pub struct Stepper2Vtbl {
+    pub query_interface: unsafe extern "C" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HResult,
+    pub add_ref: unsafe extern "C" fn(*mut c_void) -> u32,
+    pub release: unsafe extern "C" fn(*mut c_void) -> u32,
+    pub set_jmc: unsafe extern "C" fn(*mut c_void, i32) -> HResult, // fIsJMCStepper
+}
+
+/// Real bug found and fixed empirically, not guessed: an earlier version of
+/// this function called `ICorDebugStepper2::SetJMC(TRUE)` directly on a
+/// freshly created stepper and it failed with `E_INVALIDARG` on EVERY
+/// single call (confirmed via a real run through the full Docker
+/// pipeline — `docker exec` into the built image, running
+/// `sandbox-runner --language csharp --file <dll>` directly (bypassing the
+/// API's stderr-swallow-on-success behavior in `ProcessSandboxRunner.java`,
+/// which normally discards this diagnostic output) to capture raw stderr:
+/// 1777 identical `[jmc] ICorDebugStepper2::SetJMC(TRUE) -> hr=0x80070057`
+/// lines, one per stepper, for a 5-iteration loop). Root-caused by reading
+/// the REAL CoreCLR source (`gh api search/code` for
+/// `CordbStepper::SetJMC`, found in
+/// `src/coreclr/debug/di/breakpoint.cpp` despite the misleading filename):
+/// `CordbStepper::SetJMC` unconditionally returns `E_INVALIDARG` when
+/// `m_rgfMappingStop & STOP_ALL != 0`, and the constructor's member-init
+/// list sets `m_rgfMappingStop(STOP_OTHER_UNMAPPED)` — non-zero — by
+/// default on every new stepper. So `SetJMC` can never succeed without
+/// first calling `SetUnmappedStopMask(STOP_NONE)` to clear that mask. Fixed
+/// below; re-verified against the same real pipeline afterwards (see
+/// tasks.md for the before/after event counts).
+unsafe fn set_stepper_jmc(stepper: *mut c_void) {
+    let hr_mask = set_unmapped_stop_mask(stepper, STOP_NONE);
+    if hr_mask != S_OK {
+        eprintln!("[jmc] ICorDebugStepper::SetUnmappedStopMask(STOP_NONE) -> hr=0x{:08x}", hr_mask as u32);
+    }
+    match query_interface(stepper, &IID_ICORDEBUG_STEPPER2) {
+        Ok(stepper2) => {
+            let vtbl = *(stepper2 as *const *const Stepper2Vtbl);
+            let hr = ((*vtbl).set_jmc)(stepper2, 1 /* TRUE */);
+            if hr != S_OK {
+                eprintln!("[jmc] ICorDebugStepper2::SetJMC(TRUE) -> hr=0x{:08x}", hr as u32);
+            }
+        }
+        Err(hr) => {
+            eprintln!("[jmc] QueryInterface(ICorDebugStepper2) falhou -> hr=0x{:08x}", hr as u32);
+        }
     }
 }
 
@@ -451,6 +599,20 @@ pub unsafe fn get_active_frame(thread: *mut c_void) -> Result<*mut c_void, HResu
 
 // --- ICorDebugStepper ---
 
+/// `COR_DEBUG_STEP_RANGE` from cordebug.idl — a half-open `[startOffset,
+/// endOffset)` IL-offset range, relative to the stepper's frame's method
+/// (IL-relative by default; `SetRangeIL` would change that, never called
+/// here since IL-relative is exactly what pdb.rs's SequencePoints offsets
+/// already are). `#[repr(C)]`, two `ULONG32`s, no padding — verified against
+/// the real struct definition in dotnet/runtime's cordebug.idl before use
+/// (see StepRange's doc comment below), not guessed.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CorDebugStepRange {
+    pub start_offset: u32,
+    pub end_offset: u32,
+}
+
 #[repr(C)]
 pub struct StepperVtbl {
     pub query_interface: unsafe extern "C" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HResult,
@@ -459,22 +621,60 @@ pub struct StepperVtbl {
     pub is_active: *const c_void,
     pub deactivate: *const c_void,
     pub set_intercept_mask: *const c_void,
-    pub set_unmapped_stop_mask: *const c_void,
+    pub set_unmapped_stop_mask: unsafe extern "C" fn(*mut c_void, i32) -> HResult, // CorDebugUnmappedStop mask
     pub step: unsafe extern "C" fn(*mut c_void, i32) -> HResult,
+    pub step_range:
+        unsafe extern "C" fn(*mut c_void, i32, *const CorDebugStepRange, u32) -> HResult,
 }
 
-/// Step(bStepIn=TRUE) — passo mínimo (granularidade de instrução IL). Isso
-/// NÃO mudou com a leitura de sequence points do PDB (ver pdb.rs/
-/// LINE_RESOLVER): continuamos armando um novo stepper a cada
-/// StepComplete, então múltiplos eventos `step` seguidos ainda podem cair
-/// na mesma linha C# real (várias instruções IL por linha de origem) — é
-/// esperado, não um bug; normalizar isso pra "1 evento por linha" (como o
-/// JDI faz do lado Java) ficaria pra um item futuro de verdade de
-/// granularidade de step, não escopo desta mudança (que só corrige O QUE
-/// cada evento reporta como `line`, não QUANTOS eventos são emitidos).
+/// `CorDebugUnmappedStop::STOP_NONE` (cordebug.idl) — "stop nowhere in
+/// unmapped code, transparently continue through it". Needed as a
+/// precondition for JMC, see `set_stepper_jmc`'s doc comment above: a
+/// freshly created `ICorDebugStepper` defaults to `STOP_OTHER_UNMAPPED`
+/// (confirmed reading the real CoreCLR source,
+/// `CordbStepper::CordbStepper`'s member-init list in
+/// `src/coreclr/debug/di/breakpoint.cpp`), and `ICorDebugStepper2::SetJMC`
+/// unconditionally rejects (`E_INVALIDARG`) any stepper whose
+/// `m_rgfMappingStop & STOP_ALL` is non-zero (same file,
+/// `CordbStepper::SetJMC`) — so JMC can never be enabled without first
+/// clearing this mask.
+const STOP_NONE: i32 = 0x0;
+
+/// `ICorDebugStepper::SetUnmappedStopMask` — see `STOP_NONE`'s doc comment
+/// above for why `set_stepper_jmc` needs this.
+unsafe fn set_unmapped_stop_mask(stepper: *mut c_void, mask: i32) -> HResult {
+    let vtbl = *(stepper as *const *const StepperVtbl);
+    ((*vtbl).set_unmapped_stop_mask)(stepper, mask)
+}
+
+/// Step(bStepIn=TRUE) — passo mínimo (granularidade de instrução IL), usado
+/// como FALLBACK quando não dá pra calcular um range de linha real (ver
+/// `step_range` abaixo e `arm_step`): sem PDB, método sem dados de sequence
+/// point, ou offset atual caindo numa região "hidden" (código gerado pelo
+/// compilador, sem linha de origem real) — nesses casos um único hop de
+/// instrução crua é o melhor que dá pra fazer honestamente até aterrissar de
+/// volta em código com sequence point real.
 pub unsafe fn step_into(stepper: *mut c_void) -> HResult {
     let vtbl = *(stepper as *const *const StepperVtbl);
     ((*vtbl).step)(stepper, 1)
+}
+
+/// `ICorDebugStepper::StepRange(bStepIn=TRUE, ranges, 1)` — o mecanismo REAL
+/// que debuggers baseados em CLR (Visual Studio incluído) usam pra "step
+/// over/into uma linha de código fonte": ao contrário de `Step`, que sempre
+/// completa na PRÓXIMA instrução IL não importa a linha, `StepRange` só
+/// dispara StepComplete quando a execução sai do range IL dado — então
+/// armar com o range IL completo do sequence point ATUAL (ver
+/// pdb.rs::PortablePdb::step_range_for) produz exatamente 1 StepComplete por
+/// LINHA de origem, não por instrução IL. Isso é o análogo, do lado
+/// ICorDebug, do que `StepRequest.STEP_LINE` já dá de graça pro JDI/Java.
+/// Signature/ordem no vtable (índice logo após `Step`) verificadas contra o
+/// `cordebug.idl` real (dotnet/runtime, `interface ICorDebugStepper`), não
+/// adivinhadas.
+pub unsafe fn step_range(stepper: *mut c_void, step_in: bool, start_offset: u32, end_offset: u32) -> HResult {
+    let vtbl = *(stepper as *const *const StepperVtbl);
+    let ranges = [CorDebugStepRange { start_offset, end_offset }];
+    ((*vtbl).step_range)(stepper, step_in as i32, ranges.as_ptr(), 1)
 }
 
 // --- ICorDebugILFrame (só até o slot que usamos, GetLocalVariable) ---
@@ -984,6 +1184,41 @@ unsafe extern "C" fn cb_release(this: *mut c_void) -> u32 {
     (*obj).ref_count
 }
 
+/// Resolves the IL-offset range covering the CURRENT position of `thread`'s
+/// active frame (see STEP_RANGE_RESOLVER's doc comment) — `None` whenever a
+/// meaningful line range can't be computed (no active managed frame, no
+/// PDB, hidden sequence point, or the frame isn't in the user's own module —
+/// same module-gating rule LINE_RESOLVER/LOCAL_NAME_RESOLVER already use,
+/// see USER_MODULE's doc comment for why: a step landed inside CoreCLR/BCL
+/// internals must never get resolved against the user's own PDB just
+/// because rids can coincidentally collide across modules).
+unsafe fn resolve_step_range(thread: *mut c_void) -> Option<(u32, u32)> {
+    let frame = get_active_frame(thread).ok()?;
+    let il_frame = query_interface(frame, &IID_ICORDEBUG_IL_FRAME).ok()?;
+    let offset = get_il_offset(il_frame).ok()?;
+    let func = get_function(il_frame).ok()?;
+    let method_token = get_function_token(func).ok()?;
+    #[allow(static_mut_refs)]
+    let is_user_module = !USER_MODULE.is_null() && get_function_module(func).ok() == Some(USER_MODULE);
+    if !is_user_module {
+        return None;
+    }
+    STEP_RANGE_RESOLVER.and_then(|resolve| resolve(method_token, offset))
+}
+
+/// Arms `stepper`'s next step: `StepRange` over `range` when one was
+/// resolved (line-granular — see `resolve_step_range`/STEP_RANGE_RESOLVER),
+/// else falls back to plain per-IL-instruction `Step` — the same fallback
+/// used before line-range stepping existed, now scoped to just the cases
+/// that genuinely can't be resolved to a real source line (see
+/// `resolve_step_range`'s doc comment for the exact list).
+unsafe fn arm_step(stepper: *mut c_void, range: Option<(u32, u32)>) -> HResult {
+    match range {
+        Some((start, end)) => step_range(stepper, true, start, end),
+        None => step_into(stepper),
+    }
+}
+
 unsafe extern "C" fn cb_breakpoint(
     _this: *mut c_void,
     app_domain: *mut c_void,
@@ -998,8 +1233,12 @@ unsafe extern "C" fn cb_breakpoint(
     match create_stepper(thread) {
         Ok(stepper) => {
             eprintln!("[callback]   Stepper criado: {:?}", stepper);
-            let hr_step = step_into(stepper);
-            eprintln!("[callback]   Step(bStepIn=TRUE) -> hr=0x{:08x}", hr_step as u32);
+            let range = resolve_step_range(thread);
+            let hr_step = arm_step(stepper, range);
+            eprintln!(
+                "[callback]   arm_step(range={:?}) -> hr=0x{:08x}",
+                range, hr_step as u32
+            );
             let hr_cont = continue_(app_domain);
             eprintln!("[callback]   Continue() pra deixar o step acontecer -> hr=0x{:08x}", hr_cont as u32);
         }
@@ -1044,55 +1283,65 @@ unsafe extern "C" fn cb_step_complete(
     _stepper: *mut c_void,
     _reason: i32,
 ) -> HResult {
+    // Resolved once per callback, unconditionally (not gated by sampling
+    // like the expensive locals/call-stack extraction below is) — both the
+    // sampled-inspection block AND the re-arm block at the bottom need the
+    // current frame's IL offset/method token/module-membership, and these
+    // particular COM getters (GetActiveFrame/GetIP/GetFunction/
+    // GetFunctionToken/GetFunction's module) are cheap next to the per-step
+    // round-trip cost this driver already pays on every single callback,
+    // unlike full locals/call-stack extraction which stays sampling-gated.
+    let frame_info = get_active_frame(thread).ok().and_then(|frame| {
+        let il_frame = query_interface(frame, &IID_ICORDEBUG_IL_FRAME).ok()?;
+        let offset = get_il_offset(il_frame).ok()?;
+        let func = get_function(il_frame).ok();
+        let method_token = func.and_then(|f| get_function_token(f).ok()).unwrap_or(0);
+        // See USER_MODULE's doc comment: method rids are only unique WITHIN
+        // a module, and steps land in framework (CoreLib/System.*) modules
+        // constantly, not just the user's own — a rid that coincidentally
+        // also exists in the user assembly's PDB must NOT be resolved
+        // against it, or a framework-internal step can get a
+        // plausible-but-wrong real line/name (or step RANGE — same rule now
+        // applies to STEP_RANGE_RESOLVER below, not just LINE_RESOLVER).
+        // `#[allow]`: a plain pointer equality read of a `static mut`, not a
+        // reference — same non-issue as the other bare-value static reads
+        // throughout this file.
+        #[allow(static_mut_refs)]
+        let is_user_module =
+            !USER_MODULE.is_null() && func.and_then(|f| get_function_module(f).ok()) == Some(USER_MODULE);
+        Some((il_frame, offset, method_token, is_user_module))
+    });
+
     if !STEP_CAPPED {
         STEP_EVENTS_TOTAL += 1;
         if STEP_EVENTS_TOTAL % SAMPLE_N.max(1) == 0 {
-            if let Ok(frame) = get_active_frame(thread) {
-                if let Ok(il_frame) = query_interface(frame, &IID_ICORDEBUG_IL_FRAME) {
-                    let offset = get_il_offset(il_frame).unwrap_or(0);
-                    let stack = get_call_stack_names(il_frame);
-                    let func = get_function(il_frame).ok();
-                    let method_token = func.and_then(|f| get_function_token(f).ok()).unwrap_or(0);
-                    // See USER_MODULE's doc comment: method rids are only
-                    // unique WITHIN a module, and steps land in framework
-                    // (CoreLib/System.*) modules constantly, not just the
-                    // user's own — a rid that coincidentally also exists in
-                    // the user assembly's PDB must NOT be resolved against
-                    // it, or a framework-internal step can get a
-                    // plausible-but-wrong real line/name. `#[allow]`: a
-                    // plain pointer equality read of a `static mut`, not a
-                    // reference — same non-issue as the other bare-value
-                    // static reads throughout this file.
-                    #[allow(static_mut_refs)]
-                    let is_user_module = !USER_MODULE.is_null()
-                        && func.and_then(|f| get_function_module(f).ok()) == Some(USER_MODULE);
-                    // Real source line, resolved from the Portable PDB's
-                    // SequencePoints blob (see pdb.rs) when possible —
-                    // mirrors the granularity Java's JDI already gives for
-                    // free (a real line number, not a bytecode offset).
-                    // Falls back to the raw IL offset (today's pre-existing
-                    // behavior) when there's no PDB, this method has no
-                    // sequence point data, this exact offset falls inside a
-                    // "hidden" (compiler-generated, no source mapping)
-                    // region, or the frame isn't even in the user's own
-                    // module — see LINE_RESOLVER's and USER_MODULE's doc
-                    // comments above.
-                    let line = if is_user_module {
-                        LINE_RESOLVER.and_then(|resolve| resolve(method_token, offset)).map(|l| l as i64)
-                    } else {
-                        None
-                    }
-                    .unwrap_or(offset as i64);
-                    let locals = extract_locals(il_frame, method_token, offset, is_user_module);
-                    if let Some(sink) = STEP_SINK {
-                        sink(line, locals, stack);
-                    }
-                    STEP_EVENTS_EMITTED += 1;
-                    if STEP_EVENTS_EMITTED >= STEP_EVENT_CAP {
-                        STEP_CAPPED = true;
-                        if let Some(sink) = LIMIT_SINK {
-                            sink();
-                        }
+            if let Some((il_frame, offset, method_token, is_user_module)) = frame_info {
+                let stack = get_call_stack_names(il_frame);
+                // Real source line, resolved from the Portable PDB's
+                // SequencePoints blob (see pdb.rs) when possible — mirrors
+                // the granularity Java's JDI already gives for free (a real
+                // line number, not a bytecode offset). Falls back to the raw
+                // IL offset (today's pre-existing behavior) when there's no
+                // PDB, this method has no sequence point data, this exact
+                // offset falls inside a "hidden" (compiler-generated, no
+                // source mapping) region, or the frame isn't even in the
+                // user's own module — see LINE_RESOLVER's and USER_MODULE's
+                // doc comments above.
+                let line = if is_user_module {
+                    LINE_RESOLVER.and_then(|resolve| resolve(method_token, offset)).map(|l| l as i64)
+                } else {
+                    None
+                }
+                .unwrap_or(offset as i64);
+                let locals = extract_locals(il_frame, method_token, offset, is_user_module);
+                if let Some(sink) = STEP_SINK {
+                    sink(line, locals, stack);
+                }
+                STEP_EVENTS_EMITTED += 1;
+                if STEP_EVENTS_EMITTED >= STEP_EVENT_CAP {
+                    STEP_CAPPED = true;
+                    if let Some(sink) = LIMIT_SINK {
+                        sink();
                     }
                 }
             }
@@ -1101,7 +1350,19 @@ unsafe extern "C" fn cb_step_complete(
 
     if !STEP_CAPPED {
         if let Ok(stepper) = create_stepper(thread) {
-            step_into(stepper);
+            // Arm the NEXT step over the CURRENT position's full source-line
+            // IL range (see STEP_RANGE_RESOLVER/arm_step) instead of a raw
+            // single IL instruction — this is what makes StepComplete fire
+            // once per source LINE instead of once per IL instruction. Reuses
+            // frame_info computed above instead of re-querying the frame
+            // (resolve_step_range would do the exact same lookups again).
+            let range = frame_info.and_then(|(_, offset, method_token, is_user_module)| {
+                if !is_user_module {
+                    return None;
+                }
+                STEP_RANGE_RESOLVER.and_then(|resolve| resolve(method_token, offset))
+            });
+            arm_step(stepper, range);
         }
     }
     continue_(app_domain);
@@ -1344,7 +1605,19 @@ unsafe extern "C" fn cb_load_module(
         Ok(name) => {
             eprintln!("[callback] LoadModule! module={:?} nome={}", module, name);
             // heurística: não é uma dll do próprio .NET (framework), então é do usuário
-            if !name.starts_with("/usr/share/dotnet/") {
+            let is_user_module = !name.starts_with("/usr/share/dotnet/");
+            // JMC (Just My Code): marca TODAS as funções deste módulo como
+            // user-code (TRUE) ou não (FALSE) numa única chamada — ver doc
+            // comment de `set_module_jmc_status` acima. Feito pra TODO
+            // módulo que carrega (não só o do usuário), explicitamente pros
+            // dois casos, pra não depender do valor padrão do runtime.
+            // Precisa acontecer aqui, em LoadModule, ANTES de qualquer
+            // stepper poder existir (o primeiro stepper só é criado no
+            // breakpoint do método de entrada, que só é armado depois que
+            // o módulo do usuário carrega) — timing confirmado pela ordem
+            // real dos callbacks (framework carrega antes do usuário).
+            set_module_jmc_status(module, is_user_module);
+            if is_user_module {
                 // See USER_MODULE's doc comment above: this is what
                 // cb_step_complete compares against before trusting
                 // LOCAL_NAME_RESOLVER/LINE_RESOLVER's rid-keyed lookups —
@@ -1378,7 +1651,15 @@ unsafe extern "C" fn cb_load_module(
                 }
             }
         }
-        Err(hr) => eprintln!("[callback] LoadModule! module={:?} (GetName falhou: 0x{:08x})", module, hr as u32),
+        Err(hr) => {
+            eprintln!("[callback] LoadModule! module={:?} (GetName falhou: 0x{:08x})", module, hr as u32);
+            // Nome desconhecido: nunca pode ser o módulo do usuário (esse
+            // já teria que ter um nome resolvível), então trata como
+            // framework/não-JMC por segurança — mesma lógica seria aplicada
+            // se GetName tivesse funcionado e retornado um path de
+            // framework.
+            set_module_jmc_status(module, false);
+        }
     }
     let hr = continue_(ad);
     eprintln!("[callback]   Continue() no app_domain -> hr=0x{:08x}", hr as u32);

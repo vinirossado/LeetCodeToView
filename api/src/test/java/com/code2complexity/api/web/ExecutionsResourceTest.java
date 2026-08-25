@@ -94,6 +94,17 @@ class ExecutionsResourceTest {
         }
 
         @Test
+        @DisplayName("accepts 'ruby' as language")
+        void acceptsRuby() {
+            given()
+                    .contentType(ContentType.JSON)
+                    .body("{\"language\":\"ruby\",\"code\":\"puts 1\"}")
+                    .when().post("/executions")
+                    .then()
+                    .statusCode(201);
+        }
+
+        @Test
         @DisplayName("rejects an unknown language with 422")
         void rejectsUnknownLanguage() {
             given()
@@ -135,6 +146,17 @@ class ExecutionsResourceTest {
             given()
                     .contentType(ContentType.JSON)
                     .body("{\"language\":\"csharp\",\"code\":\"Console.WriteLine(1);\"}")
+                    .when().post("/executions")
+                    .then()
+                    .statusCode(201);
+        }
+
+        @Test
+        @DisplayName("does not require a Main class for Ruby either, only for Java")
+        void doesNotRequireMainClassForRuby() {
+            given()
+                    .contentType(ContentType.JSON)
+                    .body("{\"language\":\"ruby\",\"code\":\"puts 1\"}")
                     .when().post("/executions")
                     .then()
                     .statusCode(201);

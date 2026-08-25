@@ -265,6 +265,47 @@ impl PortablePdb {
         }
         points[idx - 1].line
     }
+
+    /// The half-open IL-offset range `[start, end)` of the sequence point
+    /// covering `il_offset` inside `method_token` — i.e. exactly the IL
+    /// extent of the CURRENT source line, the input
+    /// `ICorDebugStepper::StepRange` needs to step by source line instead of
+    /// by raw IL instruction (see com.rs's STEP_RANGE_RESOLVER/arm_step).
+    /// `start` is the covering point's own `il_offset` (same one `line_for`
+    /// would key off of); `end` is the NEXT sequence point's `il_offset` in
+    /// the same method, or `u32::MAX` if this is the method's last recorded
+    /// sequence point — safe as an upper bound because `StepRange` is scoped
+    /// to the stepper's own frame regardless of how large `end` is: leaving
+    /// the frame (return, exception unwind, ...) always completes the step
+    /// on its own, per `StepRange`'s own doc comment in cordebug.idl ("will
+    /// not complete until code outside the given range is reached" — a
+    /// popped frame is trivially outside any IL range of that frame's own
+    /// method). We don't otherwise track a method's total IL body length, so
+    /// this sentinel avoids needing to.
+    ///
+    /// Returns `None` in every case `line_for` would (no PDB data for this
+    /// method — not found in this PDB, or a totally different rid coming
+    /// from another module entirely, see USER_MODULE's doc comment in
+    /// com.rs — or `il_offset` before the method's first sequence point),
+    /// PLUS one `line_for` doesn't need to special-case: when the covering
+    /// sequence point is "hidden" (`line: None`, compiler-generated code
+    /// with no real source line — see `SequencePointEntry`'s doc comment).
+    /// There's no meaningful *source line* range to step by there, so the
+    /// caller (com.rs's `arm_step`) honestly falls back to plain
+    /// single-instruction `Step` for just that one hop, same "don't invent
+    /// data" fallback philosophy as `line_for`/`locals_for`.
+    pub fn step_range_for(&self, method_token: u32, il_offset: u32) -> Option<(u32, u32)> {
+        let rid = method_token & 0x00FF_FFFF;
+        let points = self.sequence_points.get(&rid)?;
+        let idx = points.partition_point(|p| p.il_offset <= il_offset);
+        if idx == 0 {
+            return None;
+        }
+        let current = &points[idx - 1];
+        current.line?;
+        let end = points.get(idx).map(|p| p.il_offset).unwrap_or(u32::MAX);
+        Some((current.il_offset, end))
+    }
 }
 
 /// Parses the `SequencePoints` blob of a single `MethodDebugInformation` row
@@ -818,6 +859,67 @@ mod tests {
         // lines — the strongest evidence this isn't accidentally reading a
         // shared/global offset table.
         assert_ne!(pdb.line_for(double_it, 1), pdb.line_for(triple_it, 1));
+    }
+
+    #[test]
+    fn step_range_for_covers_exactly_one_source_line_per_range() {
+        let pdb = parse(BRANCHING_LOOP_FIXTURE).expect("fixture should parse");
+        let token = 0x0600_0001; // <Main>$, same fixture/token as the line_for test above
+
+        // Same recorded IL offsets as the line_for test's "exact" table
+        // above, but here checking the IL RANGE each one's sequence point
+        // covers — (start, end) is (this offset, next recorded offset), or
+        // (this offset, u32::MAX) for the method's very last sequence
+        // point. Hidden points (4, 14, 28, 51) have no meaningful line
+        // range, so they must resolve to None here too, same as line_for.
+        let exact: &[(u32, Option<(u32, u32)>)] = &[
+            (0, Some((0, 2))),
+            (2, Some((2, 4))),
+            (4, None), // hidden
+            (6, Some((6, 7))),
+            (7, Some((7, 14))),
+            (14, None), // hidden
+            (17, Some((17, 18))),
+            (18, Some((18, 27))),
+            (27, Some((27, 28))),
+            (28, None), // hidden
+            (30, Some((30, 31))),
+            (31, Some((31, 40))),
+            (40, Some((40, 41))),
+            (41, Some((41, 42))),
+            (42, Some((42, 46))), // back-edge onto line 2's own range
+            (46, Some((46, 51))),
+            (51, None), // hidden
+            (54, Some((54, u32::MAX))), // last sequence point in the method
+        ];
+        for &(offset, expected) in exact {
+            assert_eq!(
+                pdb.step_range_for(token, offset),
+                expected,
+                "offset {offset}: expected {expected:?}"
+            );
+        }
+
+        // Coverage semantics, mirroring line_for's equivalent assertions:
+        // an offset strictly BETWEEN two recorded points resolves to the
+        // EARLIER point's own (start, end) range, not a range starting at
+        // the query offset itself — this is exactly what makes StepRange
+        // correct: arming it with this range steps until execution leaves
+        // the CURRENT line, regardless of which IL instruction inside that
+        // line we happened to query from.
+        assert_eq!(pdb.step_range_for(token, 3), Some((2, 4)));
+        assert_eq!(pdb.step_range_for(token, 13), Some((7, 14)));
+        assert_eq!(pdb.step_range_for(token, 16), None); // still hidden (14..17)
+        assert_eq!(pdb.step_range_for(token, 53), None); // still hidden (51..54)
+        assert_eq!(pdb.step_range_for(token, 1000), Some((54, u32::MAX)));
+    }
+
+    #[test]
+    fn step_range_for_falls_back_to_none_for_unknown_method_or_missing_data() {
+        let pdb = parse(BRANCHING_LOOP_FIXTURE).expect("fixture should parse");
+        assert_eq!(pdb.step_range_for(0x0600_0099, 0), None);
+        let older = parse(FIXTURE).expect("older fixture should still parse");
+        assert_eq!(older.step_range_for(0x0600_0001, 0).is_some(), true);
     }
 
     #[test]

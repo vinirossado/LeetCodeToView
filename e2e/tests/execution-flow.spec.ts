@@ -87,8 +87,13 @@ test('runs the C# starter example end to end and shows the known local_N/PDB dis
   await codePage.selectLanguage('csharp');
 
   // Switching language swaps in that language's starter example (app.ts
-  // onLanguageChange) and shows the C#-specific disclaimer about the
-  // locals/line asymmetry (no PDB reading yet — see spec.md).
+  // onLanguageChange) and shows the C#-specific disclaimer. Line-granular
+  // stepping (ICorDebugStepper::StepRange, see tasks.md) fixed the "same
+  // line highlighted many times in a row" artifact for the common
+  // single-statement-per-line case, so the banner's wording changed — but
+  // the locals/PDB fallback part it also documents (local_N when a real
+  // variable name can't be resolved) is unchanged, so this substring still
+  // holds.
   await expect(codePage.csharpNote).toContainText('local_N');
 
   await codePage.runAndWaitForFinish();
@@ -104,6 +109,50 @@ test('runs the C# starter example end to end and shows the known local_N/PDB dis
   // C# locals render as positional local_0/local_1/... placeholders, not
   // real variable names — this is the documented, intentional asymmetry.
   await expect(codePage.variables).toContainText('local_');
+});
+
+test('runs the Ruby starter example end to end via TracePoint: real locals and a real call stack, no PDB-style disclaimer', async ({
+  codePage,
+}) => {
+  await codePage.goto();
+  await codePage.selectLanguage('ruby');
+
+  // Unlike C#, Ruby has no equivalent asymmetry/disclaimer to show — the
+  // TracePoint driver (sandbox/ruby/driver.rb) always resolves real
+  // variable names (tp.binding.local_variables), same as Java's JDI, never
+  // positional local_N placeholders.
+  await expect(codePage.csharpNote).toHaveCount(0);
+
+  await codePage.runAndWaitForFinish();
+
+  // Checked right after the run finishes (live-follow position, same as
+  // the plain Java test above) — NOT after navigating elsewhere, since
+  // `outputSoFar()` is cumulative only up to the currently-viewed step
+  // (same semantics as the variables panel showing only the CURRENT
+  // step's locals). Found the hard way: an earlier version of this test
+  // checked output only after already navigating back to the start of the
+  // trace and stepping forward a few times for the variables assertion
+  // below — output was empty at that earlier position because the Ruby
+  // starter's first `puts total` hasn't been reached yet by step 4, so
+  // `pre` never rendered and the assertion failed with "element(s) not
+  // found", not a real product bug.
+  await codePage.openTab('Saída');
+  await expect(codePage.output).toContainText('0');
+
+  await codePage.goToStart();
+  await codePage.stepForward();
+
+  await codePage.openTab('Variáveis');
+  // Ruby starter example (app.ts STARTER_CODE.ruby): `n = 5; total = 0;
+  // i = 0; while i < n ... end`. driver.rb's first step event fires
+  // before line 1 (`n = 5`) executes, same "before" semantics JDI already
+  // has for Java — one step forward from goToStart() lands past that
+  // assignment, where `total` is already a real, named local variable in
+  // scope (assigned `0` on line 2, visible even before its own line
+  // executes per Ruby's lexical local-variable scoping — see driver.rb's
+  // module doc comment / tasks.md for that empirical finding).
+  await expect(codePage.variables).toContainText('total');
+  await expect(codePage.variables).not.toContainText('local_');
 });
 
 test('shows a clear error instead of getting stuck when a stale execution_id no longer exists server-side', async ({

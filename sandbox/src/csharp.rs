@@ -561,6 +561,21 @@ pub fn run_worker(dll_file: &Path) -> i32 {
         } else {
             None
         };
+        // Same PDB/indirection again, this time for line-GRANULAR stepping
+        // (see com::STEP_RANGE_RESOLVER's doc comment): resolves (method
+        // token, current IL offset) -> the IL range of the covering sequence
+        // point, via pdb.rs::PortablePdb::step_range_for. This is what lets
+        // com.rs's arm_step call ICorDebugStepper::StepRange instead of
+        // plain Step, so StepComplete fires once per SOURCE LINE instead of
+        // once per IL instruction — the actual fix for the "same line
+        // highlighted N times in a row" disclaimer (see tasks.md). Same
+        // None-when-no-PDB condition as the two resolvers above, since it
+        // reads from the same PDB static.
+        com::STEP_RANGE_RESOLVER = if (*std::ptr::addr_of!(PDB)).is_some() {
+            Some(|token, offset| (*std::ptr::addr_of!(PDB)).as_ref().and_then(|p| p.step_range_for(token, offset)))
+        } else {
+            None
+        };
     }
 
     let lib = match unsafe { Library::new(LIBDBGSHIM_PATH) } {

@@ -134,6 +134,9 @@ pub fn run_nsjail(mut cmd: Command) -> RunResult {
         let mut total: usize = 0;
         let mut truncated = false;
         let mut buf = [0u8; 8192];
+        // Tracks whether the byte most recently written to our own stdout
+        // was a newline -- see the truncated branch below for why.
+        let mut last_byte_was_newline = true;
         let stdout_handle = std::io::stdout();
         loop {
             let n = match reader.read(&mut buf) {
@@ -146,11 +149,51 @@ pub fn run_nsjail(mut cmd: Command) -> RunResult {
                 let _ = lock.write_all(&buf[..n]);
                 let _ = lock.flush();
             }
+            last_byte_was_newline = buf[n - 1] == b'\n';
             total += n;
             if total > OUTPUT_BYTE_CAP {
                 truncated = true;
                 break;
             }
+        }
+        if truncated && !last_byte_was_newline {
+            // Real bug found empirically while validating Ruby's
+            // OutputFlood.rb through the actual API (not caught by the
+            // same scenario run directly against sandbox-runner in
+            // isolation, which happened to hit a chunk boundary that
+            // landed on a newline by chance -- see tasks.md): this relay
+            // forwards RAW 8192-byte chunks from the jailed child's
+            // stdout, with no regard for line boundaries. When the
+            // OUTPUT_BYTE_CAP is crossed mid-chunk, the cap can land
+            // mid-LINE too (a jailed program's output lines rarely divide
+            // evenly into 8192 bytes) -- the relayed stream then does NOT
+            // end in a newline. `java.rs`/`csharp.rs`/`ruby.rs` each call
+            // `events::emit(&Event::OutputTruncated)` right after this
+            // function returns, which writes `{"type":"output_truncated"}\n`
+            // as its own `writeln!` -- but with no separating newline
+            // already in the stream, that JSON line ends up CONCATENATED
+            // onto the tail of the truncated line instead of starting a
+            // fresh one (confirmed via a real `POST /executions` against
+            // the real API: the stored trace's second-to-last event was a
+            // single `stdout` event whose text ended in
+            // `...xxx{"type":"output_truncated"}` -- ExecutionJob's
+            // `parseEventOrStdout` correctly falls through to treating that
+            // whole garbled line as plain stdout text, since it isn't valid
+            // JSON on its own, which is exactly the "misclassified as
+            // plain stdout" failure mode this project has already hit once
+            // for Java's TAB-escaping bug). This is NOT Ruby-specific --
+            // the exact same relay code path is shared by java.rs/csharp.rs
+            // too, just apparently never landed on this exact byte-count
+            // coincidence during those languages' own validation. Fixed
+            // here, once, centrally, rather than in each of the three
+            // `run()` functions separately: write one extra newline before
+            // handing control back, so whichever language-specific
+            // `events::emit(...)` call comes next always starts on a clean
+            // line, regardless of where the 8192-byte chunk boundary
+            // happened to fall.
+            let mut lock = stdout_handle.lock();
+            let _ = lock.write_all(b"\n");
+            let _ = lock.flush();
         }
         let _ = truncated_tx.send(truncated);
         if truncated {

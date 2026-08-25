@@ -61,6 +61,7 @@ public class ProcessSandboxRunner implements SandboxRunner {
             Path fileToRun = switch (execution.getLanguage()) {
                 case "java" -> writeJavaSource(workDir, execution.getCode());
                 case "csharp" -> compileCsharp(workDir, execution.getCode());
+                case "ruby" -> writeRubySource(workDir, execution.getCode());
                 default -> throw new IllegalArgumentException("unsupported language: " + execution.getLanguage());
             };
 
@@ -76,6 +77,21 @@ public class ProcessSandboxRunner implements SandboxRunner {
     // piece of the API<->Sandbox Controller contract (#153).
     private static Path writeJavaSource(Path workDir, String code) throws IOException {
         Path sourcePath = workDir.resolve("Main.java");
+        Files.writeString(sourcePath, code, StandardCharsets.UTF_8);
+        return sourcePath;
+    }
+
+    // No compile step, no naming constraint, unlike Java (writeJavaSource
+    // above) and even C# (which at least needs a real .csproj/.cs pair for
+    // `dotnet build`) — sandbox/ruby/driver.rb just `load`s whatever file
+    // ruby.rs passes it. "main.rb" is an arbitrary-but-fixed name (any name
+    // would do; ruby.rs discovers it by passing the same PathBuf's file
+    // name through unchanged, mirroring how writeJavaSource always writes
+    // "Main.java" — a fixed name here is simpler than deriving one from the
+    // submitted code, and there is nothing in Ruby's `load` semantics that
+    // would benefit from a variable one the way Java's javac does).
+    private static Path writeRubySource(Path workDir, String code) throws IOException {
+        Path sourcePath = workDir.resolve("main.rb");
         Files.writeString(sourcePath, code, StandardCharsets.UTF_8);
         return sourcePath;
     }

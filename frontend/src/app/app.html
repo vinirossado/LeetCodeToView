@@ -32,12 +32,20 @@
   <section class="editor-column" [style.width.%]="splitRatio() * 100">
     @if (language() === 'csharp') {
       <p class="csharp-note">
-        Atenção: para C#, cada passo é uma instrução IL (não uma linha, como no Java), então a
-        mesma linha pode aparecer destacada várias vezes seguidas. A linha e os nomes de variável
-        são lidos do arquivo <code>.pdb</code> gerado na compilação; quando isso não é possível
-        (sem PDB, ou trecho sem informação de depuração), a linha cai de volta pro offset de IL
-        cru e as variáveis aparecem como <code>local_N</code>. Ver painel de variáveis para
-        detalhes.
+        Atenção: para C#, cada passo avança por linha de código fonte (via
+        <code>ICorDebugStepper::StepRange</code>, mesmo mecanismo que o JDI usa no Java), não mais
+        por instrução IL individual. Ainda assim, uma linha com múltiplas instruções separadas por
+        <code>;</code>, ou a linha de abertura de um método, pode aparecer destacada mais de uma
+        vez seguida — cada uma tem seu próprio ponto de sequência no <code>.pdb</code>. O depurador
+        também só para dentro do seu próprio código (modo "Just My Code" do ICorDebug) — chamadas
+        de framework, como a primeira <code>Console.WriteLine</code>, são atravessadas
+        automaticamente em vez de geradas passo a passo, então elas não poluem mais o trace. A
+        linha e os nomes de variável são lidos do arquivo <code>.pdb</code>, gerado na compilação;
+        a linha só cai de volta pro offset de IL cru em casos raros (trecho gerado pelo compilador
+        sem ponto de sequência real). Já os nomes de variável ainda podem aparecer como
+        <code>local_N</code> quando um slot não tem escopo descrito no <code>.pdb</code> (comum em
+        alguns locais gerados pelo compilador, ex: top-level statements) — isso é uma limitação
+        separada, independente da anterior. Ver painel de variáveis para detalhes.
       </p>
     }
 

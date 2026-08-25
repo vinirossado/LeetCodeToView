@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
 @Path("/executions")
 public class ExecutionsResource {
 
-    private static final Set<String> VALID_LANGUAGES = Set.of("java", "csharp");
+    private static final Set<String> VALID_LANGUAGES = Set.of("java", "csharp", "ruby");
 
     // Best-effort check, not a real parser: sandbox-runner always writes
     // Java source to a file named Main.java, and javac requires that name
@@ -58,6 +58,14 @@ public class ExecutionsResource {
                     .entity(new ErrorResponse("Java code must declare a class named Main (the file is compiled as Main.java)"))
                     .build();
         }
+        // No equivalent naming-convention check for Ruby, same as C# — and
+        // for a different reason than C#'s (which has none because
+        // top-level statements are its own idiomatic default). Ruby has no
+        // required file/class name at all: sandbox-runner's driver.rb does
+        // `load` on whatever filename ProcessSandboxRunner writes the
+        // source to (writeRubySource writes "main.rb", an arbitrary but
+        // fixed name — there is no javac-style "filename must match a
+        // public class inside it" constraint the interpreter enforces).
 
         Execution execution = store.create(language, code);
         // Runs on its own virtual thread so the sandbox lifecycle (which

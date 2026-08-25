@@ -1,8 +1,8 @@
-// Binário unificado do Sandbox Runner — dispatcha pra java.rs ou csharp.rs
-// conforme --language, emitindo o mesmo schema de evento JSON (events.rs)
-// pras duas linguagens.
+// Binário unificado do Sandbox Runner — dispatcha pra java.rs, csharp.rs ou
+// ruby.rs conforme --language, emitindo o mesmo schema de evento JSON
+// (events.rs) pras três linguagens.
 
-use sandbox_runner_lib::{csharp, java};
+use sandbox_runner_lib::{csharp, java, ruby};
 use std::path::PathBuf;
 
 fn main() {
@@ -30,8 +30,13 @@ fn main() {
             let status = csharp::run_outer(&PathBuf::from(file), &csharp::RunOptions::default());
             std::process::exit(status.code().unwrap_or(1));
         }
+        "ruby" => {
+            let file = file.expect("--language ruby precisa de --file <arquivo.rb>");
+            let status = ruby::run(&PathBuf::from(file), &ruby::RunOptions::default());
+            std::process::exit(status.code().unwrap_or(1));
+        }
         _ => {
-            eprintln!("uso: sandbox-runner --language java|csharp --file <arquivo>");
+            eprintln!("uso: sandbox-runner --language java|csharp|ruby --file <arquivo>");
             std::process::exit(1);
         }
     }

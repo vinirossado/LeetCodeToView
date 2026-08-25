@@ -40,6 +40,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # still real despite getuid()/ps showing "nobody". --uid_mapping maps
     # to a genuinely different, unprivileged outside uid instead.
     uidmap \
+    # Ruby, via apt (not a curl'd tarball/version-manager install, unlike
+    # the JDK/dotnet above) -- deliberately the simplest option available:
+    # Debian bookworm's plain `ruby` metapackage already pulls a recent-
+    # enough interpreter (3.1, confirmed via `ruby --version` -- TracePoint/
+    # ObjectSpace.memsize_of_all/Kernel#exit! are all long-stable API,
+    # nothing here needs a specific newer Ruby), and unlike Java/dotnet
+    # there's no equivalent "pick a specific LTS channel" concern (no
+    # separate SDK-vs-runtime split, no channel/version pinning file to
+    # keep in sync the way DOTNET_VER already has to be for C#). Same
+    # binary is used both to run sandboxed user code (ruby.rs hardcodes
+    # `/usr/bin/ruby` inside the minimal Ruby rootfs, mirroring java.rs's
+    # `/usr/bin/java`) and, here in the toolchain stage, to run
+    # `sandbox/ruby/driver.rb` unsandboxed for the CDS-equivalent... except
+    # Ruby needs no such step at all (no bytecode cache/archive to build --
+    # see sandbox-build stage below, there is no RUN javac-equivalent for
+    # Ruby).
+    ruby \
     && rm -rf /var/lib/apt/lists/*
 
 # newuidmap/newgidmap refuse to map any range not delegated to the calling
@@ -237,6 +254,15 @@ COPY --from=sandbox-build /build/sandbox/target/release/sandbox-runner /app/sand
 # without also regenerating the archive against the new path.
 COPY --from=sandbox-build /app/jdi-driver.jar /app/jdi-driver.jar
 COPY --from=sandbox-build /app/jdi-driver.jsa /app/jdi-driver.jsa
+# ruby-driver.rb: the Ruby TracePoint driver (sandbox/ruby/driver.rb) --
+# no build/compile step needed (Ruby isn't compiled, unlike
+# jdi-driver.jar/.jsa above), just plain source copied to the same fixed
+# path ruby.rs::RUBY_DRIVER_PATH hardcodes. Copied from the sandbox-build
+# stage (not directly from the build context) purely for consistency with
+# how the jdi-driver artifacts above are staged, even though this one
+# didn't need that stage to produce anything -- COPY sandbox/ . in that
+# stage already put it at /build/sandbox/ruby/driver.rb.
+COPY --from=sandbox-build /build/sandbox/ruby/driver.rb /app/ruby-driver.rb
 COPY --from=analyzer-build /build/static-analyzer/target/release/static-analyzer /app/static-analyzer
 COPY --from=api-build /build/api/target/quarkus-app /app/quarkus-app
 
@@ -244,9 +270,9 @@ COPY --from=api-build /build/api/target/quarkus-app /app/quarkus-app
 # target, replacing --chroot / -- see sandbox/build-minimal-rootfs.sh's own
 # header comment for the full rationale/derivation, and tasks.md "Filesystem
 # temporário/efêmero"). Must run AFTER the COPYs above: it reads
-# /app/jdi-driver.jar, /app/jdi-driver.jsa, and /app/sandbox-runner
-# (already-built artifacts) to stage them into the new roots, not the
-# source tree.
+# /app/jdi-driver.jar, /app/jdi-driver.jsa, /app/ruby-driver.rb, and
+# /app/sandbox-runner (already-built artifacts) to stage them into the new
+# roots, not the source tree.
 COPY sandbox/build-minimal-rootfs.sh /tmp/build-minimal-rootfs.sh
 RUN bash /tmp/build-minimal-rootfs.sh /opt/sandbox-rootfs && rm /tmp/build-minimal-rootfs.sh
 

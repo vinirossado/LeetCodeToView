@@ -13,15 +13,25 @@ import type { Language } from '../../core/models/language';
 
 // NOTE: no `MonacoEnvironment.getWorker` is configured here. Monaco's web
 // workers are only needed for language *services* (autocomplete/diagnostics)
-// for languages like TS/JSON/CSS — Java/C# get plain Monarch-grammar syntax
-// highlighting, which works fine on the main thread. Wiring up worker
+// for languages like TS/JSON/CSS — Java/C#/Ruby get plain Monarch-grammar
+// syntax highlighting, which works fine on the main thread. Wiring up worker
 // bundling through @angular/build's esbuild pipeline turned out to be more
 // trouble than it's worth for what this editor actually needs; Monaco logs a
 // harmless "falling back to loading web worker code in main thread" warning
 // instead of failing. Revisit if language services are ever needed.
 function toMonacoLanguage(language: Language): string {
-  // Monaco's built-in language ids happen to match ours exactly.
-  return language === 'csharp' ? 'csharp' : 'java';
+  // Monaco's built-in language ids happen to match ours exactly (including
+  // 'ruby', also a built-in Monarch grammar — confirmed by checking the
+  // syntax highlighting actually renders in a real run, not assumed just
+  // because the id string matches).
+  switch (language) {
+    case 'csharp':
+      return 'csharp';
+    case 'ruby':
+      return 'ruby';
+    case 'java':
+      return 'java';
+  }
 }
 
 /**

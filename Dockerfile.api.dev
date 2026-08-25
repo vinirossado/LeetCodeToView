@@ -52,6 +52,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # uidmap: see Dockerfile.api — needed by nsjail's --uid_mapping so
     # sandboxed processes map to a real unprivileged uid, not root.
     uidmap \
+    # Ruby — see Dockerfile.api's identical install for the full rationale
+    # (plain apt package, no version-manager/tarball install needed).
+    ruby \
     && rm -rf /var/lib/apt/lists/*
 
 # See Dockerfile.api: newuidmap/newgidmap require /etc/subuid/subgid
@@ -113,7 +116,8 @@ RUN cargo build --release \
     && java -XX:ArchiveClassesAtExit=/app/jdi-driver.jsa \
         -cp /app/jdi-driver.jar Debugger Trivial \
         "-cp /build/cds-train -Xmx256m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=256m" \
-    && test -s /app/jdi-driver.jsa
+    && test -s /app/jdi-driver.jsa \
+    && cp ruby/driver.rb /app/ruby-driver.rb
 
 # ─── static-analyzer (baked in, NOT hot-reloaded) ─────────────────────────
 WORKDIR /build/static-analyzer

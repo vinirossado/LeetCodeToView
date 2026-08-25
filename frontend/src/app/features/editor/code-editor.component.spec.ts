@@ -79,6 +79,16 @@ describe('CodeEditorComponent', () => {
     expect(options.language).toBe('csharp');
   });
 
+  it('maps the "ruby" language input to Monaco\'s "ruby" language id', async () => {
+    const monaco = await import('monaco-editor');
+    const fixture = TestBed.createComponent(CodeEditorComponent);
+    fixture.componentRef.setInput('language', 'ruby');
+    fixture.componentRef.setInput('value', '');
+    fixture.detectChanges();
+    const [, options] = (monaco.editor.create as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(options.language).toBe('ruby');
+  });
+
   it('re-applies a line-highlight decoration when currentLine changes', () => {
     const fixture = create();
     fixture.componentRef.setInput('currentLine', 4);

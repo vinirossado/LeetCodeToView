@@ -18,7 +18,19 @@ import java.util.Set;
 @Path("/analysis")
 public class AnalysisResource {
 
-    private static final Set<String> VALID_LANGUAGES = Set.of("java", "csharp");
+    // "ruby" added here as a small, separate side-fix while wiring Ruby
+    // execution support (tasks.md, Fase 3): static-analyzer/src/ruby_adapter.rs
+    // already existed and was already fully validated on its own (see
+    // tasks.md's "Adaptador AST (Ruby)" entry), but this endpoint — the
+    // only thing the frontend's complexity panel actually calls — never
+    // had "ruby" added to either this set or ProcessStaticAnalyzer's own
+    // EXTENSIONS map, so POST /analysis with language=ruby would have kept
+    // 422ing even after the adapter itself was done. Genuinely a gap left
+    // over from that earlier, narrower-scoped task, not something this
+    // task's own checklist items (TracePoint runtime) technically required
+    // — fixed anyway since leaving it broken would mean a Ruby user could
+    // run their code but never see a complexity result for it.
+    private static final Set<String> VALID_LANGUAGES = Set.of("java", "csharp", "ruby");
 
     @Inject
     StaticAnalyzer analyzer;

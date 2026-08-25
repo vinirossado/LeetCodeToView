@@ -28,7 +28,7 @@ public class ProcessStaticAnalyzer implements StaticAnalyzer {
 
     // static-analyzer's CLI picks the adapter from the file extension (see
     // static-analyzer/src/main.rs) — not from a separate flag.
-    private static final Map<String, String> EXTENSIONS = Map.of("java", "java", "csharp", "cs");
+    private static final Map<String, String> EXTENSIONS = Map.of("java", "java", "csharp", "cs", "ruby", "rb");
 
     // Same /var/tmp reasoning as ProcessSandboxRunner: harmless here since
     // static-analyzer never runs inside nsjail, but kept consistent so
