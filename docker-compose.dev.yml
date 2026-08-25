@@ -1,0 +1,126 @@
+# Dev-mode stack: hot-reload for `api` (Quarkus live coding) and
+# `frontend` (Angular's built-in ng-serve live-reload), so editing
+# api/src/** or frontend/src/** is picked up by the RUNNING container
+# without a manual `docker compose build` + restart.
+#
+# This is a STANDALONE compose file, not an override layered on top of the
+# root docker-compose.yml (`-f docker-compose.yml -f docker-compose.dev.yml`
+# was considered, but Compose's default merge behavior CONCATENATES list-
+# valued keys like `ports` rather than replacing them — the prod file's
+# "4200:80" and this file's "4200:4200"/dev port would both apply and
+# collide/conflict; avoiding that footgun outweighed the DRYness a partial
+# override would have bought here, given how much else differs anyway:
+# different Dockerfiles, different commands, added bind mounts).
+#
+# CRITICAL — two real incidents happened integrating this file, both from
+# the same root cause (this file defaulting to the SAME Compose "project"
+# as the root docker-compose.yml, since project name defaults to the
+# directory basename and both files live in this same directory) — do not
+# remove either fix below:
+#
+# 1. `image:` pinned explicitly per service (`*-dev`). Without it, `docker
+#    compose build` derives the image tag as `<project>-<service>`, which
+#    collided with the PRODUCTION tags (`code2complexity-api:latest`/
+#    `code2complexity-frontend:latest`) — building from this file silently
+#    overwrote them, no error. Already-running prod containers kept working
+#    off their old image layers until next recreated, at which point
+#    they'd have picked up the wrong image.
+# 2. Top-level `name:` below, giving this file its OWN Compose project
+#    (`code2complexity-dev`), separate from the root file's implicit
+#    `code2complexity` project. Without it, container names also collide
+#    (`<project>-<service>-<n>`, same default) — `docker compose -f
+#    docker-compose.dev.yml up` REPLACED the running production containers
+#    outright (`Container code2complexity-api-1 Recreate`), even with the
+#    image-tag fix from #1 already in place. Confirmed live: the prod
+#    containers came back up running the dev image after this. `docker
+#    compose -f docker-compose.dev.yml down` + `docker compose up -d`
+#    (root file) restored it. With `name:` set, `docker compose ps`/`down`
+#    against either file only ever touches that file's own project.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up --build
+name: code2complexity-dev
+#
+# Host ports are DELIBERATELY different from the prod compose file
+# (8081/4201 instead of 8080/4200) so this can run side-by-side with a
+# `docker compose up` from the root docker-compose.yml without a port
+# clash — confirmed necessary empirically: this worktree was built and
+# validated while the shared prod stack (code2complexity-api-1 /
+# code2complexity-frontend-1, from the user's own session) was already
+# bound to 8080/4200 on this same host.
+#
+# sandbox-runner/static-analyzer do NOT hot-reload (see Dockerfile.api.dev's
+# header comment for why) — changing sandbox/ or static-analyzer/ still
+# needs `docker compose -f docker-compose.dev.yml build api`.
+#
+# privileged/cgroup: host mirror docker-compose.yml — nsjail (invoked by
+# sandbox-runner for real code executions) needs the same host cgroupv2
+# delegation in dev as it does in prod. See that file's comment for the
+# full "why".
+services:
+  api:
+    image: code2complexity-api-dev:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.api.dev
+    ports:
+      - "8081:8080"
+    privileged: true
+    cgroup: host
+    environment:
+      - DOTNET_GCHeapHardLimit=0x8000000
+    volumes:
+      # Only src/ is mounted (not the whole api/ dir): pom.xml/.mvn/mvnw
+      # changes still require an image rebuild (new deps need re-resolving
+      # anyway), but Java source edits are picked up live by Quarkus dev
+      # mode's lazy, mtime-based recompilation on the next HTTP request —
+      # no filesystem watcher involved, so this is unaffected by Docker
+      # Desktop for Mac's known inotify-across-bind-mount flakiness.
+      - ./api/src:/build/api/src
+      # Named volume so the Maven local repo persists across container
+      # restarts (not just the image-baked dependency:go-offline layer) —
+      # avoids re-resolving deps Quarkus dev mode pulls in beyond what
+      # go-offline pre-warmed (e.g. dev-mode-only artifacts).
+      - api-dev-m2:/root/.m2
+    working_dir: /build/api
+    # `-q -B` would hide the exact log line ("Live reload total time: ...")
+    # this task's validation step relies on seeing — left verbose on
+    # purpose. quarkus.http.host=0.0.0.0 IS required here, unlike prod:
+    # confirmed empirically that Quarkus dev mode's actual default bind
+    # host is "localhost", not the 0.0.0.0 prod default (application.
+    # properties doesn't set it either way) — without this override, the
+    # app was reachable via `curl` from INSIDE the api container itself
+    # but refused connections both from the host (the 8081 port mapping)
+    # and from the frontend container (proxy.conf.js's api:8080 target),
+    # since Docker's port publishing/inter-container networking both need
+    # the process to actually be listening on all interfaces, not just the
+    # container's loopback.
+    command: ["./mvnw", "quarkus:dev", "-Dquarkus.http.host=0.0.0.0"]
+    stdin_open: true
+    tty: true
+
+  frontend:
+    image: code2complexity-frontend-dev:latest
+    build:
+      context: frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "4201:4200"
+    volumes:
+      - ./frontend/src:/app/src
+    environment:
+      # ng serve's watcher (chokidar) relies on native filesystem events by
+      # default; those are known to be unreliable for bind mounts through
+      # Docker Desktop for Mac's virtiofs/gRPC-FUSE layer. Polling is the
+      # documented workaround for that class of problem — see tasks.md for
+      # whether it was actually needed on this host (native events may
+      # already work fine under current Docker Desktop versions; polling is
+      # kept on regardless as a safe default since the cost is negligible).
+      - CHOKIDAR_USEPOLLING=true
+      - CHOKIDAR_INTERVAL=1000
+    command: ["npx", "ng", "serve", "--host", "0.0.0.0", "--port", "4200", "--proxy-config", "proxy.conf.js"]
+    depends_on:
+      - api
+
+volumes:
+  api-dev-m2:

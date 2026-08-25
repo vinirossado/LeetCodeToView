@@ -31,6 +31,19 @@ use crate::pdb::PortablePdb;
 
 pub const CSHARP_WORKER_FLAG: &str = "--csharp-worker";
 
+// Fase 2 hardening: path to the minimal, isolated rootfs `nsjail --chroot`s
+// into instead of the container's own "/" — see java.rs's identical
+// MINIMAL_ROOTFS_JAVA constant and sandbox/build-minimal-rootfs.sh's header
+// comment (built at image-build time by that same script, into
+// /opt/sandbox-rootfs/csharp this time). Same tasks.md item: "Filesystem
+// temporário/efêmero".
+const MINIMAL_ROOTFS_CSHARP: &str = "/opt/sandbox-rootfs/csharp";
+
+// Fixed internal path the real (per-execution, dynamically-named) workdir
+// gets bind-mounted onto inside the jail -- see java.rs's identical constant
+// and its comment at the --bindmount_ro call site in `run_outer` for why.
+const JAIL_WORKDIR: &str = "/workdir";
+
 // Fase 2 hardening: minimal default-deny seccomp-bpf allowlist for the
 // jailed process -- see java.rs's JAVA_SECCOMP_POLICY doc comment for the
 // kafel syntax verification (same nsjail/kafel source, same `--help`
@@ -264,6 +277,19 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
     let workdir = cwd.parent().unwrap_or(cwd);
     events::make_world_readable(workdir).expect("falha ao ajustar permissões do workdir");
 
+    // Fase 2 hardening: `workdir` gets bind-mounted onto the FIXED
+    // JAIL_WORKDIR path below (not its own real, per-execution path) --
+    // see java.rs's identical JAIL_WORKDIR comment for why (mounting onto a
+    // dynamic path that doesn't already exist inside the minimal rootfs
+    // fails: nsjail's own mkdir-the-missing-mountpoint step runs AFTER the
+    // chroot root is already read-only). `cwd` and `dll_file` are `workdir`-
+    // relative, so their JAIL-side equivalents are derived the same way,
+    // rather than hardcoding the "out/" subdir name ProcessSandboxRunner
+    // happens to use today.
+    let cwd_suffix = cwd.strip_prefix(workdir).unwrap_or_else(|_| Path::new(""));
+    let jail_cwd = Path::new(JAIL_WORKDIR).join(cwd_suffix);
+    let jail_dll = jail_cwd.join(dll_file.file_name().expect("dll_file sem nome de arquivo"));
+
     eprintln!("[sandbox-runner/csharp] rodando {dll_file:?} isolado via nsjail (self re-exec)...");
 
     // Hoisted out instead of an inline `&format!(...)` in the args array
@@ -280,6 +306,19 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
         "--time_limit", &opts.time_limit_secs,
         "--rlimit_fsize", "inf",
         "--tmpfsmount", "/tmp",
+        // Fase 2 hardening: found empirically while validating the minimal
+        // rootfs (see MINIMAL_ROOTFS_CSHARP/tasks.md "Filesystem temporário/
+        // efêmero") that CoreCLR's PAL layer needs a REAL /dev/shm for the
+        // debugger-attach handshake specifically: it opens POSIX named
+        // semaphores there (/dev/shm/sem.clrco*/sem.clrst* — "CLR
+        // coordination"/"CLR startup", confirmed via strace), which a plain
+        // (non-debugged) `dotnet <dll>` run never touches — so this was
+        // invisible until RegisterForRuntimeStartup was exercised for real,
+        // where it failed with hr=0x80070490 (ERROR_NOT_FOUND) against a
+        // rootfs with no /dev/shm at all. A fresh tmpfs (not a bind-mount of
+        // the host's own /dev/shm) keeps semaphore names isolated per
+        // execution, same isolation property as --tmpfsmount /tmp above.
+        "--tmpfsmount", "/dev/shm",
         "--rlimit_as", "3072",
         "--rlimit_cpu", &opts.time_limit_secs,
         "--rlimit_nproc", "256",
@@ -303,8 +342,27 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
         // see CSHARP_SECCOMP_POLICY's doc comment above for how this
         // syscall set was derived and validated.
         "--seccomp_string", CSHARP_SECCOMP_POLICY,
-        "--chroot", "/",
-        "--cwd", cwd.to_str().unwrap(),
+        // Fase 2 hardening: real isolated rootfs, not the container's own "/"
+        // — see MINIMAL_ROOTFS_CSHARP's doc comment and java.rs's identical
+        // change (same rationale, same tasks.md item: "Filesystem
+        // temporário/efêmero"). `workdir` (not just `cwd`) is bind-mounted at
+        // its own real absolute path for the same reason
+        // `make_world_readable` above is also called on `workdir`, not
+        // `cwd`: the dll/pdb/deps.json/runtimeconfig.json live in `cwd`
+        // (workdir's `out/` subdir), but dbgshim's own handshake needs
+        // traversal permission through `workdir` itself too. `/dev/urandom`
+        // is bound because CoreCLR's crypto RNG opens it directly (confirmed
+        // via strace — NOT covered by the `getrandom` syscall alone, unlike
+        // Java, which never touches this device — see
+        // build-minimal-rootfs.sh's comment on the same finding). `/sys` —
+        // same informational-only cgroup/topology reads as java.rs's
+        // identical bind, already overridden here by the explicit
+        // DOTNET_GCHeapHardLimit env below.
+        "--chroot", MINIMAL_ROOTFS_CSHARP,
+        "--bindmount_ro", &format!("{}:{}", workdir.to_str().unwrap(), JAIL_WORKDIR),
+        "--bindmount_ro", "/dev/urandom",
+        "--bindmount_ro", "/sys",
+        "--cwd", jail_cwd.to_str().unwrap(),
         "--env", "DOTNET_ROOT=/usr/share/dotnet",
         "--env", "PATH=/usr/share/dotnet:/usr/bin:/bin",
         "--env", "DOTNET_GCHeapHardLimit=0x8000000",
@@ -329,7 +387,7 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
         "--",
     ])
     .arg(self_exe)
-    .args([CSHARP_WORKER_FLAG, "--dll", dll_file.to_str().unwrap()]);
+    .args([CSHARP_WORKER_FLAG, "--dll", jail_dll.to_str().unwrap()]);
 
     let result = events::run_nsjail(cmd);
     match result.outcome {

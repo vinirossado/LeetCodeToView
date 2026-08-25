@@ -149,6 +149,15 @@ COPY --from=sandbox-build /build/jdi-out /app/jdi-out
 COPY --from=analyzer-build /build/static-analyzer/target/release/static-analyzer /app/static-analyzer
 COPY --from=api-build /build/api/target/quarkus-app /app/quarkus-app
 
+# Minimal, isolated rootfs per sandboxed language (java.rs/csharp.rs --chroot
+# target, replacing --chroot / -- see sandbox/build-minimal-rootfs.sh's own
+# header comment for the full rationale/derivation, and tasks.md "Filesystem
+# temporário/efêmero"). Must run AFTER the COPYs above: it reads /app/jdi-out
+# and /app/sandbox-runner (already-built artifacts) to stage them into the new
+# roots, not the source tree.
+COPY sandbox/build-minimal-rootfs.sh /tmp/build-minimal-rootfs.sh
+RUN bash /tmp/build-minimal-rootfs.sh /opt/sandbox-rootfs && rm /tmp/build-minimal-rootfs.sh
+
 ENV SANDBOX_RUNNER_BIN="/app/sandbox-runner"
 ENV STATIC_ANALYZER_BIN="/app/static-analyzer"
 

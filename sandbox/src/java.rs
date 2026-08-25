@@ -138,6 +138,23 @@ const JAVA_SECCOMP_POLICY: &str = r#"ALLOW {
 // this is ever deployed there, re-derive (or re-validate) this list on that
 // architecture the same way, don't assume it transfers unchanged.
 
+// Fase 2 hardening: path to the minimal, isolated rootfs `nsjail --chroot`s
+// into instead of the container's own "/" (which let FilesystemEscape.java
+// read /etc/shadow successfully -- see tasks.md "Filesystem temporário/
+// efêmero"). Built at IMAGE BUILD time, not runtime, by
+// sandbox/build-minimal-rootfs.sh (COPY'd + RUN by Dockerfile.api/
+// .ci/Dockerfile into /opt/sandbox-rootfs/java) -- see that script's header
+// comment for exactly what it contains and how the file list was derived
+// (strace-based, same methodology as JAVA_SECCOMP_POLICY below).
+const MINIMAL_ROOTFS_JAVA: &str = "/opt/sandbox-rootfs/java";
+
+// Fixed internal path the real (per-execution, dynamically-named) workdir
+// gets bind-mounted onto inside the jail -- see the --bindmount_ro comment
+// at its call site in `run()` for why this has to be a fixed path
+// pre-created at image-build time (build-minimal-rootfs.sh), not the
+// workdir's own real path.
+const JAIL_WORKDIR: &str = "/workdir";
+
 pub struct RunOptions {
     pub time_limit_secs: String,
     pub sample_n: String,
@@ -239,8 +256,38 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         // see JAVA_SECCOMP_POLICY's doc comment above for how this syscall
         // set was derived and validated.
         "--seccomp_string", JAVA_SECCOMP_POLICY,
-        "--chroot", "/",
-        "--cwd", src_dir.to_str().unwrap(),
+        // Fase 2 hardening: real isolated rootfs, not the container's own "/"
+        // (see MINIMAL_ROOTFS_JAVA's doc comment above). --bindmount_ro maps
+        // the REAL workdir (src_dir, on the container's actual filesystem,
+        // e.g. under /tmp/<uuid>) onto a FIXED path (JAIL_WORKDIR) inside the
+        // new chroot -- NOT onto src_dir's own real path. Found empirically
+        // that mounting onto the real (dynamic, per-execution) path doesn't
+        // work here: nsjail mounts the chroot root itself read-only BEFORE
+        // processing the other --bindmount_ro entries, so when the bind
+        // target directory doesn't already exist inside the minimal rootfs
+        // (it can't -- it's created per-execution, not at image-build time),
+        // nsjail's own attempt to mkdir it fails with EACCES ("Permission
+        // denied") against the now-read-only root. A FIXED path can be
+        // pre-created once at image-build time (see
+        // build-minimal-rootfs.sh's `mkdir ".../workdir"`), sidestepping the
+        // problem entirely -- --cwd and the target JVM's own classpath arg
+        // below are updated to JAIL_WORKDIR too, so every reference to "where
+        // the user's compiled classes are" agrees. `/sys` is bind-mounted
+        // too (real path, not fixed -- it's a static path, always exists):
+        // some JVM startup paths read cgroup/CPU-topology files under it
+        // (confirmed via strace -- /sys/fs/cgroup/.../memory.max,
+        // /sys/devices/system/cpu/possible, etc.) purely for informational
+        // auto-sizing already overridden by this invocation's explicit
+        // -Xmx/-XX:MaxMetaspaceSize/-XX:MaxDirectMemorySize flags below --
+        // not a correctness dependency, bound in anyway rather than relying
+        // on every such read failing gracefully. Neither bind exposes
+        // anything this jail didn't already have access to before this
+        // change: /sys is non-sensitive kernel/hardware metadata, and
+        // src_dir is the user's own workdir the jail was always meant to see.
+        "--chroot", MINIMAL_ROOTFS_JAVA,
+        "--bindmount_ro", &format!("{}:{}", src_dir.to_str().unwrap(), JAIL_WORKDIR),
+        "--bindmount_ro", "/sys",
+        "--cwd", JAIL_WORKDIR,
         // NOT --quiet: nsjail's own INFO-level log line ("run time >= time
         // limit ... Killing it") is the ONLY way to tell a --time_limit
         // kill apart from a cgroup OOM kill — both end up as the exact same
@@ -286,8 +333,7 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         "Debugger",
         class_name,
         &format!(
-            "-Xlog:os+container=off -XX:CompressedClassSpaceSize=64m -cp {} -Xmx256m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=256m",
-            src_dir.to_str().unwrap()
+            "-Xlog:os+container=off -XX:CompressedClassSpaceSize=64m -cp {JAIL_WORKDIR} -Xmx256m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=256m"
         ),
     ]);
 

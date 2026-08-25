@@ -184,6 +184,13 @@ COPY --from=sandbox-build /build/jdi-out /app/jdi-out
 COPY --from=analyzer-build /build/static-analyzer/target/release/static-analyzer /app/static-analyzer
 COPY --from=api-build /build/api/target/quarkus-app /app/quarkus-app
 
+# Minimal, isolated rootfs per sandboxed language -- same as Dockerfile.api,
+# see sandbox/build-minimal-rootfs.sh's header comment and tasks.md
+# "Filesystem temporário/efêmero" for the full rationale. Must run AFTER the
+# COPYs above (reads the already-built /app/jdi-out and /app/sandbox-runner).
+COPY sandbox/build-minimal-rootfs.sh /tmp/build-minimal-rootfs.sh
+RUN bash /tmp/build-minimal-rootfs.sh /opt/sandbox-rootfs && rm /tmp/build-minimal-rootfs.sh
+
 ENV SANDBOX_RUNNER_BIN="/app/sandbox-runner"
 ENV STATIC_ANALYZER_BIN="/app/static-analyzer"
 

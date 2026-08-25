@@ -2,6 +2,9 @@ package com.code2complexity.api.web;
 
 import com.code2complexity.api.analysis.StaticAnalyzer;
 import com.code2complexity.api.error.SandboxErrorSanitizer;
+import com.code2complexity.api.metrics.Metrics;
+import com.fasterxml.jackson.databind.JsonNode;
+import io.quarkus.logging.Log;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -19,6 +22,9 @@ public class AnalysisResource {
 
     @Inject
     StaticAnalyzer analyzer;
+
+    @Inject
+    Metrics metrics;
 
     // Blocking: this shells out to a subprocess and waits for it (see
     // ProcessStaticAnalyzer), so it can't run on Vert.x's event-loop thread.
@@ -39,16 +45,35 @@ public class AnalysisResource {
             return Response.status(422).entity(new ErrorResponse("code is required")).build();
         }
 
+        // Validation failures above (empty body/bad language/blank code)
+        // are deliberately NOT logged/counted here: they're client input
+        // errors caught before any real analysis work happens, same
+        // category as the 422s ExecutionsResource returns, which aren't
+        // tracked either — the metric is meant to answer "how is the
+        // static-analyzer subprocess itself doing", not "how many
+        // malformed requests arrived".
         try {
-            return Response.ok(new AnalyzeResponse(analyzer.analyze(language, code))).build();
+            JsonNode result = analyzer.analyze(language, code);
+            Log.infof("analysis finished language=%s outcome=success", language);
+            metrics.recordAnalysis(language, true);
+            return Response.ok(new AnalyzeResponse(result)).build();
         } catch (StaticAnalyzer.UnsupportedLanguageException e) {
+            Log.infof("analysis finished language=%s outcome=failure reason=unsupported_language", language);
+            metrics.recordAnalysis(language, false);
             return Response.status(501).entity(new ErrorResponse(e.getMessage())).build();
         } catch (Exception e) {
             // static-analyzer never produces a "compiler diagnostic" (it's
             // a parser, not a compiler) — any failure here is internal, so
             // this always sanitizes down to the generic message; see
-            // SandboxErrorSanitizer.
+            // SandboxErrorSanitizer. That call already logs the raw detail
+            // server-side (Log.warn) — the line below is deliberately a
+            // separate, coarser outcome=failure summary line, consistent
+            // with the one logged for the success path above, so grepping
+            // "analysis finished" always finds every request regardless of
+            // outcome.
             String sanitized = SandboxErrorSanitizer.sanitize(e.getMessage(), "static analysis", e);
+            Log.infof("analysis finished language=%s outcome=failure reason=internal_error", language);
+            metrics.recordAnalysis(language, false);
             return Response.status(500).entity(new ErrorResponse(sanitized)).build();
         }
     }

@@ -15,6 +15,15 @@
     </button>
     @if (executionId()) {
       <span class="execution-id">execution_id: {{ executionId() }}</span>
+      <button
+        type="button"
+        class="share-btn"
+        [class.copied]="shareCopied()"
+        (click)="onCopyShareLink()"
+        title="Copiar link para compartilhar esta execução (válido só enquanto a API mantiver esta execução em memória)"
+      >
+        {{ shareCopied() ? '✓ Link copiado' : 'Compartilhar' }}
+      </button>
     }
   </div>
 </header>

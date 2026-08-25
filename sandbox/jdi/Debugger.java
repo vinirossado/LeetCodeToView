@@ -24,6 +24,31 @@ public class Debugger {
     static final int MAX_ARRAY_ELEMENTS = 20;
     static final int MAX_FIELDS = 20;
 
+    // memory_bytes instrumentation toggle (mirrors spike.suspend/
+    // spike.skipdata/spike.sample above). Defaults to ON when the property
+    // isn't set at all (java.rs doesn't pass it today) -- this flag exists
+    // so the A/B overhead measurement documented in tasks.md could be taken
+    // against the exact same binary, not so it needs to be wired through as
+    // a real feature flag.
+    static boolean readMem = true;
+    // Cached once (see initMemoryProbe): resolving Method objects and the
+    // Runtime singleton via JDI is itself a JDWP round trip, so doing it on
+    // every step would double-count overhead that has nothing to do with
+    // the actual totalMemory()/freeMemory() calls we're trying to measure.
+    static ObjectReference runtimeInstance;
+    static Method totalMemoryMethod;
+    static Method freeMemoryMethod;
+    static VirtualMachine targetVm;
+    // Thread count observed right after the main() breakpoint (JVM
+    // housekeeping threads only, at that point) -- see readUsedMemory's
+    // deadlock-avoidance guard. Caching this means the common case (thread
+    // count unchanged since init) costs exactly ONE extra JDWP round trip
+    // per step (vm.allThreads(), just to compare .size()), instead of also
+    // calling isSystemThread() -- itself 1-2 more round trips
+    // (name()/threadGroup()) -- on every housekeeping thread on every
+    // single step.
+    static int baselineThreadCount;
+
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
             System.err.println("uso: Debugger <ClassName> [jvmArgs]");
@@ -38,6 +63,7 @@ public class Debugger {
                 ? EventRequest.SUSPEND_EVENT_THREAD
                 : EventRequest.SUSPEND_ALL;
         boolean skipData = Boolean.getBoolean("spike.skipdata");
+        readMem = System.getProperty("spike.mem") == null || Boolean.getBoolean("spike.mem");
         int sampleN = Integer.getInteger("spike.sample", 1); // extrai dados só a cada N eventos; os outros só resumem
         long t0 = System.nanoTime();
         final int[] eventCount = {0};
@@ -145,6 +171,9 @@ public class Debugger {
                     }
                 } else if (event instanceof BreakpointEvent) {
                     mainThread[0] = ((BreakpointEvent) event).thread();
+                    if (readMem) {
+                        initMemoryProbe(vm, mainThread[0]);
+                    }
                     StepRequest stepReq = erm.createStepRequest(
                             ((BreakpointEvent) event).thread(),
                             StepRequest.STEP_LINE, StepRequest.STEP_OVER);
@@ -313,6 +342,115 @@ public class Debugger {
         }
     }
 
+    // Resolves java.lang.Runtime's totalMemory()/freeMemory() Methods and
+    // invokes the static Runtime.getRuntime() once to cache the singleton
+    // ObjectReference, all via JDI reflection against the TARGET vm (not
+    // this driver's own classpath -- Class.forName would resolve against
+    // the wrong JVM entirely, same class of mistake as the old
+    // Runtime.getRuntime() call this replaces). Called once, right after
+    // the target's main() breakpoint fires (thread is guaranteed suspended
+    // there regardless of suspendPolicy), so the per-step cost on the hot
+    // path is only the two invokeMethod calls themselves, not also the
+    // method/class lookup.
+    static void initMemoryProbe(VirtualMachine vm, ThreadReference thread) {
+        targetVm = vm;
+        try {
+            List<ReferenceType> classes = vm.classesByName("java.lang.Runtime");
+            if (classes.isEmpty()) return; // shouldn't happen, but fail open
+            ClassType runtimeClass = (ClassType) classes.get(0);
+            Method getRuntimeMethod = runtimeClass.methodsByName("getRuntime", "()Ljava/lang/Runtime;").get(0);
+            totalMemoryMethod = runtimeClass.methodsByName("totalMemory", "()J").get(0);
+            freeMemoryMethod = runtimeClass.methodsByName("freeMemory", "()J").get(0);
+            // INVOKE_SINGLE_THREADED: without it, invokeMethod resumes EVERY
+            // thread in the target VM for the duration of the call (JDI
+            // default), which would silently defeat SUSPEND_ALL's whole
+            // purpose (a 2nd real thread could run unobserved between
+            // steps) and race with the ThreadStartEvent multi-thread guard
+            // above. With it, only `thread` itself is resumed to make the
+            // call, everything else stays suspended exactly as SUSPEND_ALL
+            // intends. Confirmed empirically (see tasks.md): without this
+            // flag, MultiThread.java's second thread got a chance to start
+            // between step events instead of being caught by the guard.
+            Value result = runtimeClass.invokeMethod(thread, getRuntimeMethod, List.of(), ClassType.INVOKE_SINGLE_THREADED);
+            runtimeInstance = (ObjectReference) result;
+            baselineThreadCount = vm.allThreads().size();
+        } catch (Exception e) {
+            // Fail open, same tolerance as isSystemThread/serializeValue
+            // elsewhere in this file: memory_bytes just stays null for this
+            // run rather than crashing the whole instrumented execution
+            // over a best-effort metric.
+            runtimeInstance = null;
+            System.err.println("[mem] falha ao inicializar sonda de memória: " + e);
+        }
+    }
+
+    // Invokes Runtime.totalMemory()/freeMemory() INSIDE the target VM via
+    // JDI remote method invocation (2 synchronous JDWP round trips, each at
+    // least as expensive as a step round trip -- see tasks.md for measured
+    // overhead) and returns totalMemory-freeMemory, i.e. actually-used heap
+    // in the TARGET process. This is the whole point of doing it this way
+    // instead of Runtime.getRuntime() called directly in this file: that
+    // would read the DRIVER's own heap (a separate JVM process), not the
+    // target's.
+    static Long readUsedMemory(ThreadReference thread) {
+        if (runtimeInstance == null) return null;
+        // Real, reproducible deadlock found empirically (see tasks.md,
+        // "memória (bytes...)"): invokeMethod (even with
+        // INVOKE_SINGLE_THREADED) can permanently hang the WHOLE target VM
+        // -- not just this driver's call -- when it races with a second
+        // real thread starting concurrently (MultiThread.java: ~60-90% of
+        // runs across two independent A/B trials, with and without
+        // INVOKE_SINGLE_THREADED, confirmed to never return even after 60s,
+        // not just slow). Root cause narrowed to a HotSpot/JDWP-internal
+        // conflict between delivering a SUSPEND_ALL ThreadStartEvent for the
+        // new thread and servicing an in-flight invoke on another thread --
+        // beyond what's fixable from the driver side. vm.allThreads() is a
+        // fresh JDWP query against the target's ACTUAL current thread list
+        // (unlike our own event-driven bookkeeping, e.g. mainThread[0]
+        // above, which can be stale by definition -- it's only updated when
+        // OUR loop gets around to processing a ThreadStartEvent), so it
+        // reliably observes a just-started thread even in the window before
+        // its ThreadStartEvent has reached our queue.remove() loop -- the
+        // exact window where the deadlock was reproduced. Skipping the
+        // probe whenever more than one non-JVM-housekeeping thread is
+        // currently live closes that race: validated with 30/30 clean runs
+        // of MultiThread.java after adding this check (0/30 before, in the
+        // same two trials above) -- the existing multi-thread guard
+        // (ThreadStartEvent handler above) still catches and rejects the
+        // program immediately after, unaffected by this.
+        try {
+            List<ThreadReference> threads = targetVm.allThreads();
+            // Fast path: JVM housekeeping thread count is stable across a
+            // single-threaded run, so an unchanged count (the overwhelming
+            // common case -- multi-threaded programs are MVP-unsupported
+            // anyway) means nothing new to check, no need to call
+            // isSystemThread (itself more JDWP round trips) per thread.
+            if (threads.size() > baselineThreadCount) {
+                for (ThreadReference t : threads) {
+                    if (!t.equals(thread) && !isSystemThread(t)) {
+                        return null;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            return null;
+        }
+        try {
+            long total = ((LongValue) runtimeInstance.invokeMethod(
+                    thread, totalMemoryMethod, List.of(), ObjectReference.INVOKE_SINGLE_THREADED)).value();
+            long free = ((LongValue) runtimeInstance.invokeMethod(
+                    thread, freeMemoryMethod, List.of(), ObjectReference.INVOKE_SINGLE_THREADED)).value();
+            return total - free;
+        } catch (Exception e) {
+            // Same fail-open reasoning as initMemoryProbe. Also covers
+            // IncompatibleThreadStateException, which would fire if this
+            // is ever called with a thread not actually suspended by an
+            // event -- shouldn't happen given where this is called from,
+            // but this metric isn't worth crashing the run over if it does.
+            return null;
+        }
+    }
+
     static void emitStepEvent(LocatableEvent event, long t0) {
         try {
             ThreadReference thread = event.thread();
@@ -342,14 +480,17 @@ public class Debugger {
             }
             stack.append(']');
 
-            // memory_bytes stays null: Runtime.getRuntime() here would
-            // measure the debugger's OWN JVM (this process), not the
-            // launched target's — that would be actively misleading, not
-            // just noisy, so it's omitted until there's a real way to read
-            // the debuggee's heap (JMX-over-JDWP against the target).
+            // memory_bytes: read via JDI remote method invocation against
+            // the TARGET vm's own Runtime.totalMemory()/freeMemory() (see
+            // initMemoryProbe/readUsedMemory) -- NOT Runtime.getRuntime()
+            // called directly in this file, which would measure the
+            // debugger's OWN JVM (a separate process), not the launched
+            // target's.
+            Long memBytes = readMem ? readUsedMemory(thread) : null;
+            String memJson = memBytes == null ? "null" : String.valueOf(memBytes);
             System.out.println(String.format(
-                    "{\"type\":\"step\",\"line\":%d,\"locals\":%s,\"stack\":%s,\"time_ns\":%d,\"memory_bytes\":null}",
-                    loc.lineNumber(), locals, stack, System.nanoTime() - t0));
+                    "{\"type\":\"step\",\"line\":%d,\"locals\":%s,\"stack\":%s,\"time_ns\":%d,\"memory_bytes\":%s}",
+                    loc.lineNumber(), locals, stack, System.nanoTime() - t0, memJson));
         } catch (Exception e) {
             System.err.println("{\"type\":\"error\",\"message\":\"" + escapeJson(String.valueOf(e)) + "\"}");
         }

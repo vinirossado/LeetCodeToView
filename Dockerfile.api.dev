@@ -1,0 +1,131 @@
+# Dev-mode image for the `api` service — companion to the production
+# Dockerfile.api, NOT a replacement for it (that file is untouched).
+#
+# The idea: run `./mvnw quarkus:dev` (Quarkus's own "live coding" feature)
+# instead of packaging+running a fat jar. Quarkus's dev mode recompiles
+# changed Java sources and reloads them into the running JVM automatically
+# — it does this LAZILY, on the next incoming HTTP request after a source
+# file's mtime changes, not via a background filesystem watcher. That
+# matters here because it means this even works reliably with a bind-mounted
+# source tree on Docker Desktop for Mac, where inotify events across the
+# host<->container boundary are known to be unreliable — a plain mtime
+# check on request has no such problem. See docker-compose.dev.yml for how
+# api/src gets bind-mounted into this image at runtime.
+#
+# Toolchain: this duplicates Dockerfile.api's "toolchain" stage (nsjail
+# build deps, JDK 25, .NET SDK, netcoredbg's libdbgshim.so, Rust) rather
+# than sharing it, because Docker has no cross-Dockerfile FROM/COPY
+# --from — only from stages within the SAME file, or from a pre-built
+# tagged image. Duplicating a single apt/toolchain layer was judged less
+# risky than introducing a shared-base-image build step into this dev-only
+# path. Comments trimmed vs. Dockerfile.api's originals (see that file for
+# the full "why" on each toolchain choice); the packages/versions/pins here
+# are kept in sync with it on purpose.
+#
+# sandbox-runner and static-analyzer are BAKED INTO THIS IMAGE at build
+# time (their source is COPY'd, not bind-mounted) — they do NOT hot-reload.
+# See tasks.md "Dockerfile por serviço com hot-reload em dev" for why: Rust
+# has no equivalent of Quarkus's live coding, cargo-watch would need this
+# same full toolchain rebuilt in the loop, and these two binaries change far
+# less often than api/src or frontend/src. Editing sandbox/ or
+# static-analyzer/ still requires `docker compose -f docker-compose.dev.yml
+# build api` to pick up the change.
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    flex bison \
+    pkg-config \
+    libprotobuf-dev protobuf-compiler \
+    libnl-route-3-dev \
+    libcap-dev \
+    libseccomp-dev \
+    git \
+    curl \
+    gnupg \
+    ca-certificates \
+    libicu-dev \
+    python3 \
+    maven \
+    unzip \
+    # uidmap: see Dockerfile.api — needed by nsjail's --uid_mapping so
+    # sandboxed processes map to a real unprivileged uid, not root.
+    uidmap \
+    && rm -rf /var/lib/apt/lists/*
+
+# See Dockerfile.api: newuidmap/newgidmap require /etc/subuid/subgid
+# delegation even for real root. Delegates the one uid/gid (65534,
+# nobody/nogroup) java.rs/csharp.rs map sandboxed executions to.
+RUN echo "root:65534:1" > /etc/subuid && echo "root:65534:1" > /etc/subgid
+
+# .NET SDK
+RUN curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
+    && bash /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet \
+    && rm /tmp/dotnet-install.sh
+ENV PATH="/usr/share/dotnet:${PATH}"
+ENV DOTNET_ROOT="/usr/share/dotnet"
+
+# netcoredbg — only used for its bundled libdbgshim.so (csharp.rs dlopens
+# it directly). linux-arm64 build, matching Dockerfile.api/sandbox/Dockerfile.
+RUN curl -sSL https://github.com/Samsung/netcoredbg/releases/download/3.0.0-1006/netcoredbg-linux-arm64.tar.gz -o /tmp/netcoredbg.tar.gz \
+    && mkdir -p /usr/share/netcoredbg \
+    && tar -xzf /tmp/netcoredbg.tar.gz -C /usr/share/netcoredbg \
+    && rm /tmp/netcoredbg.tar.gz
+
+# nsjail — no apt package, build from source
+RUN git clone --depth 1 https://github.com/google/nsjail.git /tmp/nsjail \
+    && cd /tmp/nsjail && make \
+    && cp nsjail /usr/local/bin/nsjail \
+    && cd / && rm -rf /tmp/nsjail
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# JDK 25 — used for both Quarkus itself and the sandboxed Java path
+# (java.rs hardcodes /usr/bin/java). See Dockerfile.api for why this is a
+# single JDK install, not two.
+RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" > /etc/apt/sources.list.d/adoptium.list \
+    && apt-get update && apt-get install -y --no-install-recommends temurin-25-jdk \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/lib/jvm/temurin-25-jdk-* /usr/lib/jvm/jdk-25
+ENV JAVA_HOME="/usr/lib/jvm/jdk-25"
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# ─── sandbox-runner + jdi Debugger (baked in, NOT hot-reloaded) ───────────
+# /app/jdi-out is not configurable — sandbox-runner/src/{main,java}.rs
+# hardcode "-cp", "/app/jdi-out" for the debuggee's classpath, so this
+# exact path has to exist regardless of dev vs. prod.
+WORKDIR /build/sandbox
+COPY sandbox/ .
+RUN cargo build --release \
+    && mkdir -p /app \
+    && cp target/release/sandbox-runner /app/sandbox-runner \
+    && javac -encoding UTF-8 -d /app/jdi-out jdi/Debugger.java
+
+# ─── static-analyzer (baked in, NOT hot-reloaded) ─────────────────────────
+WORKDIR /build/static-analyzer
+COPY static-analyzer/ .
+RUN cargo build --release && cp target/release/static-analyzer /app/static-analyzer
+
+# ─── api: pre-warm the Maven dependency cache only ────────────────────────
+# api/src is intentionally NOT copied here — it's bind-mounted at runtime
+# (docker-compose.dev.yml) so edits are visible without a rebuild. Copying
+# just pom.xml/.mvn/mvnw and running dependency:go-offline here means the
+# ~/.m2 cache baked into this layer already has Quarkus's (many) build-time
+# deps, so the first `quarkus:dev` after `docker compose up` doesn't have to
+# download the whole internet before it can start.
+WORKDIR /build/api
+COPY api/pom.xml .
+COPY api/.mvn .mvn
+COPY api/mvnw .
+RUN ./mvnw -q -B dependency:go-offline || true
+
+ENV SANDBOX_RUNNER_BINARY_PATH="/app/sandbox-runner"
+ENV STATIC_ANALYZER_BINARY_PATH="/app/static-analyzer"
+
+EXPOSE 8080
+
+# No CMD: docker-compose.dev.yml supplies `./mvnw quarkus:dev`, run against
+# the bind-mounted api/ tree.

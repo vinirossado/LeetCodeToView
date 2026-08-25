@@ -1,6 +1,7 @@
+import { HttpErrorResponse } from '@angular/common/http';
 import { TestBed } from '@angular/core/testing';
 import { Subject, of } from 'rxjs';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './app';
 import type { AnalysisOutcome } from './core/models/analysis.model';
 import type { ExecutionEvent, StepEvent } from './core/models/execution-event.model';
@@ -75,6 +76,13 @@ describe('App', () => {
         { provide: ComplexityApiService, useValue: { analyze: () => of(analyzeResult) } },
       ],
     });
+  });
+
+  afterEach(() => {
+    // Several tests below push a ?execution=... query string onto jsdom's
+    // location to exercise the shared-link boot path — reset it so it
+    // doesn't leak into unrelated tests run afterwards.
+    window.history.pushState({}, '', '/');
   });
 
   function create() {
@@ -154,6 +162,121 @@ describe('App', () => {
 
     expect(fixture.componentInstance.executionId()).toBe('exec-old');
     expect(fixture.componentInstance.totalSteps()).toBe(2);
+  });
+
+  describe('shared execution links (?execution=<id>)', () => {
+    it('on init, a ?execution=<id> query param loads that execution via GET /trace', () => {
+      window.history.pushState({}, '', '/?execution=exec-shared');
+      const fixture = create();
+      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', events: [step(1), step(2), step(3)] });
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.executionId()).toBe('exec-shared');
+      expect(fixture.componentInstance.totalSteps()).toBe(3);
+    });
+
+    it('a ?execution=<id> query param takes priority over a stored last-execution-id, not a silent fallback to it', () => {
+      localStorage.setItem('code2complexity.lastExecutionId', 'exec-own-last');
+      window.history.pushState({}, '', '/?execution=exec-shared');
+      const fixture = create();
+
+      // Only the shared id's GET /trace should have been requested — the
+      // fixture's getTrace$ stub is shared across both ids, so assert via
+      // what actually reaches the component instead of call counting.
+      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', events: [step(1)] });
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.executionId()).toBe('exec-shared');
+    });
+
+    it('loading a shared execution does NOT overwrite the localStorage last-execution-id (session-only visit, see app.ts constructor comment)', () => {
+      localStorage.setItem('code2complexity.lastExecutionId', 'exec-own-last');
+      window.history.pushState({}, '', '/?execution=exec-shared');
+      const fixture = create();
+      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', events: [step(1)] });
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.executionId()).toBe('exec-shared');
+      expect(localStorage.getItem('code2complexity.lastExecutionId')).toBe('exec-own-last');
+    });
+
+    it('a subsequent Run after visiting a shared link persists normally (the suppression is one-shot)', () => {
+      window.history.pushState({}, '', '/?execution=exec-shared');
+      const fixture = create();
+      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', events: [step(1)] });
+      fixture.detectChanges();
+
+      fixture.componentInstance.onRun();
+      createExecution$.next({ execution_id: 'exec-new-run' });
+      fixture.detectChanges();
+
+      expect(localStorage.getItem('code2complexity.lastExecutionId')).toBe('exec-new-run');
+    });
+
+    it('a nonexistent shared execution id shows the existing "execution not found" error, same path as a stale localStorage id', () => {
+      window.history.pushState({}, '', '/?execution=does-not-exist');
+      const fixture = create();
+      getTrace$.error(new HttpErrorResponse({ status: 404, error: { error: 'execution not found' } }));
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.runError()).toContain('execution not found');
+    });
+  });
+
+  describe('share/copy link button', () => {
+    function stubClipboard() {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      return writeText;
+    }
+
+    it('copies a URL containing ?execution=<current id> to the clipboard', async () => {
+      const writeText = stubClipboard();
+      const fixture = create();
+      fixture.componentInstance.onRun();
+      createExecution$.next({ execution_id: 'exec-1' });
+      fixture.detectChanges();
+
+      await fixture.componentInstance.onCopyShareLink();
+
+      expect(writeText).toHaveBeenCalledTimes(1);
+      const copiedUrl = new URL(writeText.mock.calls[0][0] as string);
+      expect(copiedUrl.searchParams.get('execution')).toBe('exec-1');
+    });
+
+    it('shows a brief confirmation after a successful copy', async () => {
+      stubClipboard();
+      const fixture = create();
+      fixture.componentInstance.onRun();
+      createExecution$.next({ execution_id: 'exec-1' });
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.shareCopied()).toBe(false);
+      await fixture.componentInstance.onCopyShareLink();
+      expect(fixture.componentInstance.shareCopied()).toBe(true);
+    });
+
+    it('does not claim success when the Clipboard API itself rejects', async () => {
+      const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      const fixture = create();
+      fixture.componentInstance.onRun();
+      createExecution$.next({ execution_id: 'exec-1' });
+      fixture.detectChanges();
+
+      await fixture.componentInstance.onCopyShareLink();
+
+      expect(fixture.componentInstance.shareCopied()).toBe(false);
+    });
+
+    it('does nothing when there is no execution yet (button is not shown in app.html for this case)', async () => {
+      const writeText = stubClipboard();
+      const fixture = create();
+
+      await fixture.componentInstance.onCopyShareLink();
+
+      expect(writeText).not.toHaveBeenCalled();
+    });
   });
 
   describe('panel tabs', () => {

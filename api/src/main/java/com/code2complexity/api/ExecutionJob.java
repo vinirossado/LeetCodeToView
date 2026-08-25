@@ -1,12 +1,14 @@
 package com.code2complexity.api;
 
 import com.code2complexity.api.error.SandboxErrorSanitizer;
+import com.code2complexity.api.metrics.Metrics;
 import com.code2complexity.api.model.Execution;
 import com.code2complexity.api.model.ExecutionStatus;
 import com.code2complexity.api.sandbox.SandboxRunner;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.quarkus.logging.Log;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.util.Set;
@@ -37,11 +39,21 @@ public class ExecutionJob {
     @Inject
     SandboxRunner runner;
 
+    @Inject
+    Metrics metrics;
+
     public void perform(Execution execution) {
         store.updateStatus(execution.getId(), ExecutionStatus.RUNNING);
+        // Wall-clock, not CPU time — this is meant to answer "how long did
+        // the caller wait for a result", which is what matters for the
+        // metrics endpoint's average/p95, not how much of that was actual
+        // sandboxed-process CPU vs. process-spawn/compile overhead.
+        long startedAtMs = System.currentTimeMillis();
         try {
             runner.run(execution, line -> store.appendEvent(execution.getId(), parseEventOrStdout(line)));
             store.finish(execution.getId(), ExecutionStatus.COMPLETED);
+            logAndRecordOutcome(execution, ExecutionStatus.COMPLETED, null, System.currentTimeMillis() - startedAtMs);
+            return;
         } catch (Exception e) {
             // sandbox-runner/java.rs/csharp.rs can themselves emit a
             // specific, already-clean terminal event on stdout BEFORE
@@ -72,7 +84,42 @@ public class ExecutionJob {
                 store.appendEvent(execution.getId(), errorEvent);
             }
             store.finish(execution.getId(), ExecutionStatus.FAILED);
+            logAndRecordOutcome(execution, ExecutionStatus.FAILED, terminalEventType(execution), System.currentTimeMillis() - startedAtMs);
         }
+    }
+
+    // Structured, grep-able outcome line for every execution — the whole
+    // point of tasks.md's "Métricas de uso e observabilidade" item. Always
+    // includes execution_id explicitly (rather than via MDC/logging
+    // context) so grepping a specific id in production logs surfaces this
+    // line alongside the SandboxErrorSanitizer.sanitize(...) warn line
+    // above (which already includes "execution " + id in its own message)
+    // — same convention, just extended here to the outcome itself, not
+    // only to the failure-detail line.
+    private void logAndRecordOutcome(Execution execution, ExecutionStatus status, String terminalEventType, long durationMs) {
+        Log.infof(
+                "execution finished execution_id=%s language=%s status=%s event=%s duration_ms=%d",
+                execution.getId(), execution.getLanguage(), status.jsonValue(),
+                terminalEventType == null ? "none" : terminalEventType, durationMs);
+        metrics.recordExecution(execution.getLanguage(), status.jsonValue(), terminalEventType, durationMs);
+    }
+
+    // Only called for a FAILED execution. The catch block above guarantees
+    // the last event is always one of ALREADY_TERMINAL_EVENT_TYPES by this
+    // point: either sandbox-runner emitted a specific one in-band, or the
+    // generic {"type":"error",...} fallback was just appended above when it
+    // hadn't. The empty-events / non-matching-type fallback to "unknown"
+    // is defensive only — not expected to be hit in practice, but cheap
+    // insurance against ever NPE-ing/mis-tagging a metric on a future
+    // change to the catch block's own logic.
+    private static String terminalEventType(Execution execution) {
+        var events = execution.getEvents();
+        if (events.isEmpty()) {
+            return "unknown";
+        }
+        JsonNode last = events.get(events.size() - 1);
+        String type = last.isObject() ? last.path("type").asText(null) : null;
+        return type != null ? type : "unknown";
     }
 
     // Mirrors frontend/src/app/core/models/execution-event.model.ts's

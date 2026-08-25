@@ -77,6 +77,34 @@
   color: var(--c2c-text-muted);
 }
 
+.share-btn {
+  background: transparent;
+  color: var(--c2c-text-secondary);
+  border: 1px solid var(--c2c-border);
+  border-radius: var(--c2c-radius-sm);
+  padding: 0.35em 0.7em;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.share-btn:hover {
+  color: var(--c2c-text);
+  background: var(--c2c-bg-hover);
+}
+
+.share-btn.copied {
+  color: var(--c2c-success);
+  border-color: var(--c2c-success);
+  background: var(--c2c-success-bg);
+}
+
 .layout {
   display: flex;
   align-items: stretch;

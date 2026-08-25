@@ -1,0 +1,36 @@
+# Dev-mode image for the `frontend` service — companion to the production
+# frontend/Dockerfile, NOT a replacement for it (that file is untouched).
+#
+# Runs Angular's own dev server (`ng serve`), which already has built-in
+# live-reload (a websocket the served page connects back to; on a source
+# change the CLI rebuilds the changed module and either HMR-patches it or
+# triggers a full browser reload), instead of building a static production
+# bundle served by nginx. frontend/src is bind-mounted at runtime (see
+# docker-compose.dev.yml) so ng serve's watcher sees edits immediately.
+#
+# The prod nginx.conf's reverse-proxy routing (/executions, /analysis ->
+# the `api` container) has no nginx equivalent here — ng serve is the
+# server. proxy.conf.json (new file, sibling to this Dockerfile) replicates
+# the same two routes via Angular CLI's built-in dev-server proxy
+# (https://angular.dev/tools/cli/serve#proxying-to-a-backend-server), incl.
+# the websocket upgrade /executions/:id/events needs.
+
+FROM node:22-alpine
+WORKDIR /app
+
+# Dependency install layer, cached separately from source so editing
+# frontend/src doesn't invalidate it.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Rest of the project (proxy.conf.json, angular.json, tsconfig*, public/,
+# etc.) — everything EXCEPT src/, which is bind-mounted at runtime instead
+# so it doesn't go stale. See docker-compose.dev.yml's api-dev comment for
+# why this project mounts src/ specifically rather than the whole service
+# directory: pom.xml/package.json changes should still require a rebuild,
+# only source edits shouldn't.
+COPY . .
+
+EXPOSE 4200
+
+# No CMD: docker-compose.dev.yml supplies the `ng serve` invocation.

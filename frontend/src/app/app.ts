@@ -34,6 +34,17 @@ const STARTER_CODE: Record<Language, string> = {
 /** localStorage key for the reload/reconnect fallback (spec.md "Reconexão"). */
 const LAST_EXECUTION_ID_KEY = 'code2complexity.lastExecutionId';
 
+/**
+ * Query param carrying a shared execution id, e.g. `?execution=<uuid>`
+ * (tasks.md "Compartilhamento de execuções"). A plain query param on the
+ * existing single, un-routed page was chosen over introducing a real
+ * Angular Router route for this: there is no router usage anywhere in the
+ * app today (app.routes.ts is an empty array, no <router-outlet> in
+ * app.html) and standing up a whole route tree would be a disproportionate
+ * structural change just to read one id out of the URL on boot.
+ */
+const SHARE_EXECUTION_QUERY_PARAM = 'execution';
+
 /** localStorage key persisting the user's chosen editor/panels split ratio. */
 const SPLIT_RATIO_KEY = 'code2complexity.splitRatio';
 
@@ -107,6 +118,23 @@ export class App {
   readonly analysisOutcome = signal<AnalysisOutcome | null>(null);
   readonly analysisLoading = signal<boolean>(false);
 
+  // Brief "copied!" confirmation shown on the share button after a
+  // successful clipboard write; reverts on its own after SHARE_COPY_FEEDBACK_MS.
+  readonly shareCopied = signal<boolean>(false);
+  private shareCopiedTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // Set for exactly one effect run right after booting from a shared link
+  // (?execution=<id>), so that one-time load does not get written into
+  // LAST_EXECUTION_ID_KEY — see the constructor comment for why. Deliberately
+  // a plain field, NOT a signal: the persist effect below both reads AND
+  // writes this flag in the same run, and reading a signal makes the effect
+  // track it as a dependency — writing it would then re-schedule the same
+  // effect to run again immediately (within the same flush), by which point
+  // the flag already reads false and the "one-shot" skip would defeat
+  // itself. A plain field read inside the effect body is not tracked, so
+  // toggling it doesn't cause a spurious extra run.
+  private suppressNextPersist = false;
+
   // Execution/session state, re-exposed as plain signals for the template.
   readonly executionId = this.session.executionId;
   readonly runError = this.session.runError;
@@ -133,8 +161,32 @@ export class App {
   });
 
   constructor() {
+    // A shared link (?execution=<id>) always wins over the localStorage
+    // "resume my own last run" fallback: someone who was sent a link wants
+    // to see THAT execution, not silently land on whatever this browser
+    // happened to run last.
+    const sharedId =
+      typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get(SHARE_EXECUTION_QUERY_PARAM) : null;
     const lastId = typeof localStorage !== 'undefined' ? localStorage.getItem(LAST_EXECUTION_ID_KEY) : null;
-    if (lastId) {
+
+    if (sharedId) {
+      // Design decision (tasks.md "Compartilhamento de execuções"): opening
+      // a shared link does NOT overwrite this browser's own "last
+      // execution" resume slot. Sharing is treated as a one-off guest
+      // visit, not a takeover of "what this browser was doing" — if it
+      // silently replaced LAST_EXECUTION_ID_KEY, a user who opens a
+      // colleague's link, closes the tab, and later reopens the bare app
+      // URL from a bookmark would unexpectedly land back on the
+      // colleague's (possibly already-expired, since ExecutionStore is
+      // in-memory only) execution instead of resuming their own work. The
+      // query param itself already makes a *refresh of the shared URL*
+      // keep showing the shared execution (it's re-read on every boot,
+      // see above) — this suppression only affects what happens once the
+      // user navigates away from that URL. If the user then clicks Run or
+      // opens another link, that new id persists normally.
+      this.suppressNextPersist = true;
+      this.session.load(sharedId);
+    } else if (lastId) {
       this.session.load(lastId);
     }
 
@@ -143,7 +195,12 @@ export class App {
     // instead of losing it (spec.md "Reconexão").
     effect(() => {
       const id = this.executionId();
-      if (id && typeof localStorage !== 'undefined') {
+      if (!id) return;
+      if (this.suppressNextPersist) {
+        this.suppressNextPersist = false; // one-shot: only skips the shared-link boot load
+        return;
+      }
+      if (typeof localStorage !== 'undefined') {
         localStorage.setItem(LAST_EXECUTION_ID_KEY, id);
       }
     });
@@ -197,6 +254,46 @@ export class App {
 
   togglePlay(): void {
     this.trace.togglePlay();
+  }
+
+  /**
+   * Builds the shareable URL for the current execution
+   * (`https://.../?execution=<id>`). Reads the current origin/pathname off
+   * `window.location` rather than hardcoding a host, so it works the same
+   * in dev (localhost:4200) and in whatever production host this actually
+   * gets deployed to. Any pre-existing query string is dropped — a shared
+   * link should point at exactly one execution, not carry along params
+   * from whatever was in the address bar when Share was clicked (e.g. the
+   * viewer's own earlier ?execution=<other-id>).
+   */
+  private buildShareUrl(executionId: string): string {
+    const url = new URL(window.location.href);
+    url.search = '';
+    url.searchParams.set(SHARE_EXECUTION_QUERY_PARAM, executionId);
+    return url.toString();
+  }
+
+  /**
+   * Copies the current execution's share URL to the clipboard and shows a
+   * brief confirmation on the button. Honest about the two ways this can
+   * not "just work": no execution yet (button isn't shown in that case,
+   * see app.html), and the Clipboard API itself failing (denied permission,
+   * insecure context) — in that case shareCopied is left false rather than
+   * lying that it succeeded.
+   */
+  async onCopyShareLink(): Promise<void> {
+    const id = this.executionId();
+    if (!id) return;
+
+    const url = this.buildShareUrl(id);
+    try {
+      await navigator.clipboard.writeText(url);
+      this.shareCopied.set(true);
+      if (this.shareCopiedTimeout) clearTimeout(this.shareCopiedTimeout);
+      this.shareCopiedTimeout = setTimeout(() => this.shareCopied.set(false), 2000);
+    } catch {
+      this.shareCopied.set(false);
+    }
   }
 
   private runAnalysis(language: Language, code: string): void {
