@@ -1,5 +1,16 @@
 # Especificação técnica
 
+## Escopo do produto: sem contas, sem persistência (decisão fechada)
+
+O produto é rodar código isolado e mostrar complexidade/execução/call stack — o equivalente ao LeetCode sem a descrição do problema, não uma plataforma de contas/progresso salvo. Isso não é uma lacuna a preencher depois; é a identidade do produto, e as duas maiores peças de escopo que dependeriam dela ficam deliberadamente de fora:
+
+- **Sem autenticação/contas.** Nada no valor central (rodar código, ver complexidade/execução/call stack) exige saber quem é o usuário. O compartilhamento de execução já existente (link público, `?execution=<uuid>`) já cobre o caso real de "mostrar uma execução pra outra pessoa" sem precisar de conta nenhuma.
+- **Sem persistência de histórico por usuário.** Consequência direta do ponto acima — "histórico por usuário" pressupõe a existência de um usuário identificável, que este produto não tem por design. `ExecutionStore` continua em memória, efêmero (já documentado em `spec.md`/`tasks.md` como limitação conhecida do link de compartilhamento) — aceito, não um bug.
+
+Isso segue o mesmo raciocínio de escopo mínimo bem documentado na indústria pra produtos de ferramenta/utilitário (em oposição a produtos de plataforma/comunidade): adicionar contas antes de ter um motivo de produto real pra elas (não só "seria legal ter histórico") é o mesmo tipo de complexidade paga antecipadamente que a decisão de IPC/fila (ver "Contrato API↔Sandbox Controller" abaixo) já evita do lado de infraestrutura — aqui do lado de produto.
+
+**Gatilho pra revisitar**: uma razão de produto concreta que dependa de identidade de usuário (não hipotética) — ex. querer que o próprio usuário volte e veja o histórico dele, ou um caso de uso de sala de aula onde um instrutor precisa ver o progresso de alunos identificados.
+
 ## Arquitetura
 
 ```
@@ -211,6 +222,8 @@ Para maior segurança: microVMs, como Firecracker, em vez de depender somente de
 > Mensagens de erro/stack trace do runtime podem vazar detalhes internos do sandbox (caminhos, versão de kernel, estrutura de containers) — precisam ser sanitizadas antes de chegar ao frontend, mostrando só o que é relevante ao erro do código do usuário.
 
 > Em escala, o cgroup limita uma execução individual, mas não impede que muitas execuções simultâneas no mesmo host disputem CPU real entre si ("noisy neighbor"). Isso exige scheduling/bin-packing a nível de cluster (não só limite por processo) conforme o número de usuários simultâneos cresce.
+>
+> **Decisão fechada: sem scheduling de cluster por enquanto.** Deploy atual é um único host (VPS via Docker Swarm), 1 réplica do `api` (deliberadamente — ver o comentário de `deploy.replicas` em `.ci/stack.yml`, que já documenta o motivo: a superfície de privilégio do nsjail não deve ser multiplicada por réplica até essa questão ter uma resposta melhor). Bin-packing/scheduling de cluster é, por definição, um problema de MÚLTIPLOS hosts — não existe hoje. Mesmo racional de "não pagar a complexidade antes de precisar" do item de IPC acima. **Gatilho pra revisitar**: escalar horizontalmente além de um único host.
 
 ### Isolamento de execução: nsjail
 
@@ -234,7 +247,15 @@ Sandbox Controller (dentro de um container Docker comum)
   Runtime da linguagem (isolado)
 ```
 
-> Ambiente local: todo o projeto sobe via `docker-compose` (API, Sandbox Controller, Frontend). O container do Sandbox Controller precisa rodar com as capabilities que o `nsjail` exige pra criar namespaces (ex: `CAP_SYS_ADMIN`) — sem isso o compose sobe normalmente, mas o isolamento simplesmente não funciona em dev.
+> Ambiente local: todo o projeto sobe via `docker-compose` (API, Sandbox Controller, Frontend). O container do Sandbox Controller precisa das capabilities/`security_opt` que o `nsjail` exige pra criar namespaces/cgroups — sem isso o compose sobe normalmente, mas o isolamento simplesmente não funciona em dev. **Não é mais `privileged: true`**: `docker-compose.yml` usa hoje um conjunto mínimo validado empiricamente (`cap_drop: [ALL]` + 7 capabilities específicas + `security_opt`/bind mount de cgroup — ver o comentário do próprio arquivo pra evidência completa de cada peça) — real narrowing, não a config original do MVP.
+
+### Contrato API↔Sandbox Controller: fork+exec direto, sem fila (decisão fechada)
+
+Hoje `ProcessSandboxRunner.java` faz `fork+exec` direto do binário `sandbox-runner`, sem fila/gRPC/socket. **Decisão: manter assim** — introduzir uma fila (Redis/NATS) resolve um problema real (desacoplar API e Sandbox Controller rodando em hosts DIFERENTES), mas esse problema não existe no deploy atual (um único VPS via Docker Swarm, `api` bundlando API + Sandbox Controller no mesmo container, 1 réplica). Adicionar a fila agora seria complexidade paga antes de precisar dela.
+
+Isso segue a mesma lógica de "boring technology" bem documentada na indústria: Dan McKinley, ["Choose Boring Technology"](https://boringtechnology.club/) argumenta explicitamente contra adicionar peças de infraestrutura assíncrona (filas incluídas) antes de ter um motivo concreto pra precisar delas — cada peça nova consome uma das poucas "fichas de inovação" que uma equipe pequena tem, com custo operacional (deploy, monitoramento, modos de falha novos) pago independente de precisar da capacidade que ela desbloqueia. Martin Fowler documenta o mesmo princípio aplicado a decomposição de serviços em ["MonolithFirst"](https://martinfowler.com/bliki/MonolithFirst.html) — comece monolítico, decomponha quando a fronteira de escala real aparecer, não antes. O caso público mais citado de reverter essa decisão prematura é o post da Segment ["Goodbye Microservices"](https://segment.com/blog/goodbye-microservices/), onde a equipe reverteu uma arquitetura de filas/serviços separados de volta pra um monólito depois de constatar que a complexidade operacional superava o benefício real na escala em que estavam.
+
+**Gatilho documentado pra revisitar**: precisar rodar o Sandbox Controller em host(s) diferente(s) da API (ex: escalar horizontalmente a capacidade de execução isolada), ou precisar de ciclos de release/deploy independentes entre os dois. Nenhum dos dois é verdade hoje.
 
 ### Timeout de execução
 
