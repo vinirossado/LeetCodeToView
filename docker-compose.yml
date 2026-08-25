@@ -4,17 +4,64 @@
 # container (see Dockerfile.api for why: no real IPC contract between API
 # and Sandbox Controller yet, ProcessSandboxRunner/ProcessStaticAnalyzer
 # shell out to local binaries). It needs nsjail's namespace/cgroup
-# privileges to actually sandbox anything — `privileged: true` + `cgroup:
-# host` mirror what was needed in this project's own Fase 0.5 spike testing
-# (see tasks.md "Achado de ambiente... Docker Desktop"): nsjail needs the
-# HOST's root cgroupv2 hierarchy to set up its own delegated cgroup, which
-# `--cgroupns=host` (this field's compose equivalent) provides — without
-# it nsjail fails with "Couldn't write to cgroup.subtree_control: Device or
-# resource busy", reproduced empirically running this exact compose file.
-# This is broader than nsjail strictly needs and is NOT meant to be how
-# this runs in production; the `.ci/` deploy path should scope this down
-# (or move nsjail's capabilities to the real Sandbox Controller service
-# once that split exists).
+# privileges to actually sandbox anything.
+#
+# **Not `privileged: true` anymore** — replaced with the minimal set found
+# and validated empirically (tasks.md Fase 0.5 backlog item, closed): real
+# `POST /executions` runs (Java/C#/Ruby) plus the FilesystemEscape/
+# NetworkEscape pentest snippets all behave identically to the old
+# `privileged: true` baseline under this config. Four independent pieces,
+# all required together (removing any one reproduces a real, distinct
+# nsjail failure — not guessed, each isolated by testing it removed):
+#   1. `cap_add` below (7 caps, not `setcap` — this project's earlier
+#      Fase 0.5 spike tested a similar 6-cap set via `setcap` on a non-root
+#      user and hit an insurmountable `setgroups` failure in the user
+#      namespace; that does NOT reproduce here, because this container
+#      runs nsjail as root (`orig_euid==0`), which is a different code path
+#      in nsjail's own user.cc — confirmed by reading nsjail's source).
+#      `DAC_OVERRIDE` is the one that isn't obvious: root without it is
+#      still subject to normal DAC checks on cgroupfs once `cap_drop: ALL`
+#      strips it, so nsjail's `mkdir cgroup.../NSJAIL.<pid>` fails with
+#      "Permission denied" without it, confirmed empirically.
+#   2. `cgroup: host` (`--cgroupns=host`) — same requirement already
+#      documented before (nsjail needs the host's root cgroupv2 hierarchy,
+#      fails with "Couldn't write to cgroup.subtree_control: Device or
+#      resource busy" otherwise).
+#   3. The explicit `/sys/fs/cgroup:rw` bind mount — `cgroup: host` alone
+#      still leaves `/sys/fs/cgroup` mounted **read-only** inside the
+#      container (confirmed via `mount | grep cgroup` showing `ro`, and via
+#      nsjail failing `mkdir(...): Read-only file system` without this).
+#      Docker mounts it ro by default for any non-`privileged` container
+#      regardless of capabilities or `cgroupns`; there's no narrower
+#      per-mount flag for this, only this explicit override or full
+#      `privileged`.
+#   4. `security_opt: [systempaths=unconfined, seccomp=unconfined]` —
+#      the two hardest-won findings here, neither is a capability gap:
+#        - `systempaths=unconfined` disables Docker's default masked/
+#          readonly bind-mounts under `/proc` and `/sys` (e.g. `/dev/null`
+#          over `/proc/kcore`). Without it nsjail's own nested `mount
+#          --bind` of a fresh procfs for the jail's new PID namespace fails
+#          with EPERM — nsjail's own log line names this exact mechanism:
+#          "procfs mount may fail if /proc has overmounts".
+#        - `seccomp=unconfined` was the most surprising finding: Docker's
+#          *default* seccomp profile blocks `pivot_root` for non-privileged
+#          containers **unconditionally** — confirmed by testing with
+#          `--cap-add=ALL` (literally every Linux capability) under the
+#          default profile and still hitting `pivot_root(...): Operation
+#          not permitted`. This is not gated on capabilities at all; only
+#          `--privileged` or disabling the profile lifts it. A hand-written
+#          custom seccomp profile that allowlists just `pivot_root`/`mount`/
+#          `unshare` (narrower than fully unconfined) was not attempted —
+#          real further-narrowing candidate for later, not done here.
+#
+# Net effect vs the old `privileged: true`: same seccomp/systempaths
+# posture (both already fully open under `privileged`), but ~33 fewer
+# Linux capabilities (7 instead of all ~40 — no `CAP_SYS_MODULE`,
+# `CAP_SYS_BOOT`, `CAP_SYS_PTRACE`, `CAP_MAC_ADMIN`, etc.) and **no**
+# device passthrough (`privileged` also grants access to all host
+# devices; this config grants none). Real, validated narrowing — not a
+# full fix (seccomp confinement for the outer container is still fully
+# open, same as before). See tasks.md for the full investigation.
 services:
   api:
     build:
@@ -22,8 +69,22 @@ services:
       dockerfile: Dockerfile.api
     ports:
       - "8080:8080"
-    privileged: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+      - SYS_CHROOT
+      - NET_ADMIN
+      - SYS_RESOURCE
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
     cgroup: host
+    security_opt:
+      - systempaths=unconfined
+      - seccomp=unconfined
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
     environment:
       - DOTNET_GCHeapHardLimit=0x8000000
       # Rate-limit headroom for local dev / the E2E suite ONLY — does NOT
