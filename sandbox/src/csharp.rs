@@ -259,7 +259,41 @@ pub struct RunOptions {
 impl Default for RunOptions {
     fn default() -> Self {
         Self {
-            time_limit_secs: std::env::var("SPIKE_TIME_LIMIT").unwrap_or_else(|_| "15".into()),
+            // Renamed from the spike-era SPIKE_TIME_LIMIT — see java.rs's
+            // identical RunOptions::default comment for the full rationale
+            // (production-sounding name, split per-language env var,
+            // trace-and-replay single-wall-clock model, 5,000-step cap
+            // interaction). Kept a SEPARATE env var from Java's
+            // (CSHARP_TIME_LIMIT_SECS, not a shared name) because the two
+            // runtimes have genuinely different measured per-step costs —
+            // see below.
+            //
+            // Default 15s (unchanged numerically from the old spike default,
+            // but now a deliberately DERIVED value, not a leftover). Real
+            // measurement (docker run, --privileged --cgroupns=host, this
+            // exact image): a moderately complex program (nested loops, a
+            // 60-element array, a helper method call, string concatenation
+            // in the hot path — same shape of program used for the Java
+            // measurement, for a fair comparison) hit the 5,000-event cap in
+            // ~3.5s wall time; a trivial flat 20k-iteration loop
+            // (BigCountLoop) hit it in ~2.0s. Both comfortably faster than
+            // Java's equivalents (~8.9s / ~5.3s) — consistent with the
+            // "Throttling/amostragem" finding already in tasks.md that C#'s
+            // dominant per-step cost is the ICorDebug round-trip itself, not
+            // locals/stack extraction, and with the observed stack traces
+            // here actually descending into CLR-internal frames (string
+            // formatting helpers, Memmove, etc.) that JDI's coarser
+            // STEP_OVER never surfaces for the Java equivalent. 15s gives
+            // ~4.3x margin over the ~3.5s worst case measured — a larger
+            // margin ratio than Java's ~2.8x, deliberately: C# has a real,
+            // documented stepper-hang flakiness unrelated to the step cap
+            // (tasks.md "stepper do ICorDebug trava indefinidamente" in
+            // StartCore/exception-unwind cases) where an otherwise-legitimate
+            // run can genuinely need to wait out most of the budget before
+            // nsjail's own --time_limit reaps it — extra headroom here isn't
+            // just paranoia, it's covering a known correctness gap this task
+            // does not fix.
+            time_limit_secs: std::env::var("CSHARP_TIME_LIMIT_SECS").unwrap_or_else(|_| "15".into()),
             sample_n: std::env::var("SPIKE_SAMPLE").unwrap_or_else(|_| "1".into()),
         }
     }
@@ -491,7 +525,7 @@ pub fn run_worker(dll_file: &Path) -> i32 {
         // production-sounding here; see tasks.md for that scope decision.
         // Read directly from the environment (not threaded through as a fn
         // arg) because run_worker is invoked from main.rs's dispatcher with
-        // just `--dll`, no RunOptions — same pattern SPIKE_TIME_LIMIT
+        // just `--dll`, no RunOptions — same pattern CSHARP_TIME_LIMIT_SECS
         // already uses a few lines below for the inner deadline. run_outer
         // forwards it explicitly via `--env SPIKE_SAMPLE=...` (see that
         // function), so it's guaranteed present here inside the jail.
@@ -504,13 +538,26 @@ pub fn run_worker(dll_file: &Path) -> i32 {
         // PDB is optional: `dotnet build -c Debug` produces one right next
         // to the dll (see ProcessSandboxRunner.compileCsharp on the API
         // side), but if it's missing/unparseable for any reason,
-        // LOCAL_NAME_RESOLVER stays None and extract_locals falls back to
-        // the positional "local_N" naming that's always worked.
+        // LOCAL_NAME_RESOLVER/LINE_RESOLVER stay None and extract_locals/
+        // cb_step_complete fall back to the positional "local_N" naming and
+        // raw IL offset that always worked before either resolver existed.
         PDB = PortablePdb::load(dll_file);
         com::LOCAL_NAME_RESOLVER = if (*std::ptr::addr_of!(PDB)).is_some() {
             Some(|token, offset| {
                 (*std::ptr::addr_of!(PDB)).as_ref().map(|p| p.locals_for(token, offset)).unwrap_or_default()
             })
+        } else {
+            None
+        };
+        // Same PDB, same static-fn-pointer indirection as LOCAL_NAME_RESOLVER
+        // right above (com::LINE_RESOLVER's own doc comment explains why a
+        // plain `fn` is required here) — resolves (method token, IL offset)
+        // to a real C# source line via the PDB's SequencePoints blob (see
+        // pdb.rs::PortablePdb::line_for). Registered only when a PDB
+        // actually loaded, same condition as the locals resolver, since
+        // both read from the same `PDB` static.
+        com::LINE_RESOLVER = if (*std::ptr::addr_of!(PDB)).is_some() {
+            Some(|token, offset| (*std::ptr::addr_of!(PDB)).as_ref().and_then(|p| p.line_for(token, offset)))
         } else {
             None
         };
@@ -631,7 +678,24 @@ pub fn run_worker(dll_file: &Path) -> i32 {
     // (e.g. stuck waiting on ExitProcess for some other reason); it just
     // returns non-zero without emitting, since run_outer can't tell that
     // apart from a normal crash either way.
-    let run_timeout_secs: u64 = std::env::var("SPIKE_TIME_LIMIT")
+    //
+    // Renamed from SPIKE_TIME_LIMIT to CSHARP_TIME_LIMIT_SECS, same as
+    // RunOptions::default above — but note this read is UNAFFECTED by that
+    // rename in practice: this line runs INSIDE the jail, and nsjail does
+    // NOT forward the parent's environment by default (confirmed
+    // empirically, see tasks.md "Cap de 5.000 eventos" / "Throttling"
+    // finding on SPIKE_TIME_LIMIT's pre-existing non-forwarding — this var
+    // was never added to run_outer's `--env` allowlist, unlike SPIKE_SAMPLE
+    // which was fixed). So this always falls back to the hardcoded default
+    // below regardless of what's set on the host — a known, documented gap,
+    // not fixed by this task (would require adding `--env` forwarding here
+    // too, changing scope from "pick a value" to "fix env propagation").
+    // The fallback default is kept in sync with RunOptions::default's 15s
+    // (see that comment for the real measurement behind the number) so that,
+    // even though this specific read can't be tuned via the env var today,
+    // its hardcoded value still matches the deliberately-chosen production
+    // default rather than silently drifting from it.
+    let run_timeout_secs: u64 = std::env::var("CSHARP_TIME_LIMIT_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(15);

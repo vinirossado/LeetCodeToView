@@ -32,9 +32,12 @@
   <section class="editor-column" [style.width.%]="splitRatio() * 100">
     @if (language() === 'csharp') {
       <p class="csharp-note">
-        Atenção: para C#, a linha destacada abaixo é o offset de IL (não a linha real do
-        código-fonte) e as variáveis aparecem como <code>local_N</code> — ainda não há leitura de
-        PDB. Ver painel de variáveis para detalhes.
+        Atenção: para C#, cada passo é uma instrução IL (não uma linha, como no Java), então a
+        mesma linha pode aparecer destacada várias vezes seguidas. A linha e os nomes de variável
+        são lidos do arquivo <code>.pdb</code> gerado na compilação; quando isso não é possível
+        (sem PDB, ou trecho sem informação de depuração), a linha cai de volta pro offset de IL
+        cru e as variáveis aparecem como <code>local_N</code>. Ver painel de variáveis para
+        detalhes.
       </p>
     }
 

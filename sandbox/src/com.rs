@@ -52,6 +52,19 @@ pub static mut SAMPLE_N: u32 = 1;
 // (the icordebug-spike default, and csharp.rs's own fallback when no .pdb
 // was found) means extract_locals keeps using positional `local_N` keys.
 pub static mut LOCAL_NAME_RESOLVER: Option<fn(u32, u32) -> BTreeMap<u32, String>> = None;
+// Same indirection/lifecycle as LOCAL_NAME_RESOLVER immediately above (this
+// file is shared with the legacy icordebug-spike binary, no `pdb` module
+// available there either) — csharp::run_worker sets this from the SAME
+// loaded PortablePdb, resolving (method token, IL offset) -> real C# source
+// line via the SequencePoints blob (see pdb.rs::PortablePdb::line_for).
+// `None` (the icordebug-spike default) OR a `Some` resolver returning `None`
+// for a given (token, offset) — no .pdb, method not in it, offset falls in a
+// "hidden" compiler-generated region — both mean cb_step_complete keeps
+// using the raw IL offset as `line`, exactly like before this resolver
+// existed; this is the same fallback philosophy LOCAL_NAME_RESOLVER already
+// established for local_N names, just applied to the other half of the
+// event schema.
+pub static mut LINE_RESOLVER: Option<fn(u32, u32) -> Option<u32>> = None;
 
 // Multi-thread event model decision (spec.md "Multi-thread", pending since
 // Fase 1): blocked in the MVP, same choice made for Java (jdi/Debugger.java)
@@ -101,6 +114,31 @@ pub static mut LOCAL_NAME_RESOLVER: Option<fn(u32, u32) -> BTreeMap<u32, String>
 // is out of scope here (see tasks.md).
 pub static mut SEEN_THREADS: Vec<*mut c_void> = Vec::new();
 const MAX_TOLERATED_THREADS: usize = 2;
+
+// Real bug found and fixed while validating SequencePoints line resolution
+// end-to-end (see tasks.md): `mdMethodDef` tokens (the `rid` half of
+// `method_token`, everything LOCAL_NAME_RESOLVER/LINE_RESOLVER key their
+// lookups by) are only unique WITHIN a single module — cb_step_complete
+// fires for every single-step, including ones landed inside CoreCLR/BCL
+// internals (System.Console, System.IO, ...), not just the user's own
+// module. Confirmed empirically, with a real reproduction (not just a
+// theoretical concern): stepping the `branching_loop` test program (see
+// pdb.rs's fixture of the same name — it has a `Helper.TripleIt` method at
+// rid 4) through a real `docker run`, a step landed inside a framework
+// method called `CheckIo` (rid 4 too, in ITS OWN module — a real System.IO
+// internal, confirmed via its position in the call stack) — before this
+// fix, `LINE_RESOLVER`/`line_for` would have confidently returned
+// `Some(24)` and `Some(27)` for that step: `Helper.TripleIt`'s REAL lines
+// in Program.cs, entirely unrelated to what `CheckIo` was actually doing.
+// A plausible-but-wrong line number is worse than the old raw-IL-offset
+// fallback (which was at least honestly not-a-line-number) — so both
+// resolvers are now only consulted when the current frame's function is
+// confirmed to be in the SAME module the PDB was loaded for. Set once, the
+// first time `cb_load_module` identifies the user's own module (see that
+// function below) — by the time any step can possibly fire, that module
+// has necessarily already loaded, so this is
+// always populated before `cb_step_complete` needs it.
+pub static mut USER_MODULE: *mut c_void = std::ptr::null_mut();
 
 unsafe fn report_error(message: String) {
     FATAL_ERROR = true;
@@ -425,8 +463,15 @@ pub struct StepperVtbl {
     pub step: unsafe extern "C" fn(*mut c_void, i32) -> HResult,
 }
 
-/// Step(bStepIn=TRUE) — passo mínimo (granularidade de instrução IL, já que
-/// ainda não temos sequence points do PDB pra step por linha de verdade).
+/// Step(bStepIn=TRUE) — passo mínimo (granularidade de instrução IL). Isso
+/// NÃO mudou com a leitura de sequence points do PDB (ver pdb.rs/
+/// LINE_RESOLVER): continuamos armando um novo stepper a cada
+/// StepComplete, então múltiplos eventos `step` seguidos ainda podem cair
+/// na mesma linha C# real (várias instruções IL por linha de origem) — é
+/// esperado, não um bug; normalizar isso pra "1 evento por linha" (como o
+/// JDI faz do lado Java) ficaria pra um item futuro de verdade de
+/// granularidade de step, não escopo desta mudança (que só corrige O QUE
+/// cada evento reporta como `line`, não QUANTOS eventos são emitidos).
 pub unsafe fn step_into(stepper: *mut c_void) -> HResult {
     let vtbl = *(stepper as *const *const StepperVtbl);
     ((*vtbl).step)(stepper, 1)
@@ -467,10 +512,14 @@ pub unsafe fn get_caller(frame: *mut c_void) -> Result<Option<*mut c_void>, HRes
     }
 }
 
-/// Offset IL atual do frame (ICorDebugILFrame::GetIP) — usado como
-/// substituto de número de linha enquanto não há leitura de PDB (ver
-/// find_entry_point_token e spec.md: sem PDB, não existe mapeamento IL→linha
-/// C# original disponível via API COM nenhuma).
+/// Offset IL atual do frame (ICorDebugILFrame::GetIP) — não há API COM
+/// nenhuma (ICorDebug) que devolva número de linha C# diretamente, então
+/// esse offset é sempre o ponto de partida. `cb_step_complete` (ver acima)
+/// passa esse valor pro LINE_RESOLVER (pdb.rs::PortablePdb::line_for, via o
+/// SequencePoints blob do PDB) pra resolver a linha real; só cai de volta
+/// pro offset IL cru quando não há PDB, o método não tem dados de sequence
+/// point, ou o offset cai numa região "hidden" (código gerado pelo
+/// compilador, sem linha de origem real).
 pub unsafe fn get_il_offset(il_frame: *mut c_void) -> Result<u32, HResult> {
     let vtbl = *(il_frame as *const *const ILFrameVtbl);
     let mut offset: u32 = 0;
@@ -1001,12 +1050,40 @@ unsafe extern "C" fn cb_step_complete(
             if let Ok(frame) = get_active_frame(thread) {
                 if let Ok(il_frame) = query_interface(frame, &IID_ICORDEBUG_IL_FRAME) {
                     let offset = get_il_offset(il_frame).unwrap_or(0);
-                    let line = offset as i64;
                     let stack = get_call_stack_names(il_frame);
-                    let method_token = get_function(il_frame)
-                        .and_then(|func| get_function_token(func))
-                        .unwrap_or(0);
-                    let locals = extract_locals(il_frame, method_token, offset);
+                    let func = get_function(il_frame).ok();
+                    let method_token = func.and_then(|f| get_function_token(f).ok()).unwrap_or(0);
+                    // See USER_MODULE's doc comment: method rids are only
+                    // unique WITHIN a module, and steps land in framework
+                    // (CoreLib/System.*) modules constantly, not just the
+                    // user's own — a rid that coincidentally also exists in
+                    // the user assembly's PDB must NOT be resolved against
+                    // it, or a framework-internal step can get a
+                    // plausible-but-wrong real line/name. `#[allow]`: a
+                    // plain pointer equality read of a `static mut`, not a
+                    // reference — same non-issue as the other bare-value
+                    // static reads throughout this file.
+                    #[allow(static_mut_refs)]
+                    let is_user_module = !USER_MODULE.is_null()
+                        && func.and_then(|f| get_function_module(f).ok()) == Some(USER_MODULE);
+                    // Real source line, resolved from the Portable PDB's
+                    // SequencePoints blob (see pdb.rs) when possible —
+                    // mirrors the granularity Java's JDI already gives for
+                    // free (a real line number, not a bytecode offset).
+                    // Falls back to the raw IL offset (today's pre-existing
+                    // behavior) when there's no PDB, this method has no
+                    // sequence point data, this exact offset falls inside a
+                    // "hidden" (compiler-generated, no source mapping)
+                    // region, or the frame isn't even in the user's own
+                    // module — see LINE_RESOLVER's and USER_MODULE's doc
+                    // comments above.
+                    let line = if is_user_module {
+                        LINE_RESOLVER.and_then(|resolve| resolve(method_token, offset)).map(|l| l as i64)
+                    } else {
+                        None
+                    }
+                    .unwrap_or(offset as i64);
+                    let locals = extract_locals(il_frame, method_token, offset, is_user_module);
                     if let Some(sink) = STEP_SINK {
                         sink(line, locals, stack);
                     }
@@ -1061,12 +1138,25 @@ unsafe fn dereference_value(value: *mut c_void) -> Result<Option<*mut c_void>, H
 /// GetLocalVariable falhar — sinal de que passou do fim da lista de locals
 /// da assinatura do método). Chave é o nome real da variável, resolvido via
 /// LOCAL_NAME_RESOLVER (leitura do Portable PDB — ver pdb.rs) quando
-/// disponível; cai de volta pra "local_N" (índice posicional puro) quando
-/// não há resolver setado (icordebug-spike, o binário legado) ou quando o
-/// resolver não achou nome pro slot (sem .pdb encontrado, ou índice fora de
-/// qualquer LocalScope conhecido).
-pub unsafe fn extract_locals(il_frame: *mut c_void, method_token: u32, il_offset: u32) -> BTreeMap<String, serde_json::Value> {
-    let names = LOCAL_NAME_RESOLVER.map(|resolve| resolve(method_token, il_offset)).unwrap_or_default();
+/// `is_user_module` é true; cai de volta pra "local_N" (índice posicional
+/// puro) quando não há resolver setado (icordebug-spike, o binário legado),
+/// o resolver não achou nome pro slot (sem .pdb encontrado, ou índice fora
+/// de qualquer LocalScope conhecido), OU `is_user_module` é false — ver
+/// USER_MODULE's doc comment (com.rs) pra por que esse último caso importa:
+/// sem ele, um frame de dentro do CoreCLR/BCL poderia por coincidência
+/// reaproveitar um rid que também existe no PDB do usuário e ganhar um nome
+/// de variável plausível mas errado, em vez de simplesmente "local_N".
+pub unsafe fn extract_locals(
+    il_frame: *mut c_void,
+    method_token: u32,
+    il_offset: u32,
+    is_user_module: bool,
+) -> BTreeMap<String, serde_json::Value> {
+    let names = if is_user_module {
+        LOCAL_NAME_RESOLVER.map(|resolve| resolve(method_token, il_offset)).unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
     let mut locals = BTreeMap::new();
     for i in 0..64u32 {
         let value = match get_local_variable(il_frame, i) {
@@ -1255,6 +1345,12 @@ unsafe extern "C" fn cb_load_module(
             eprintln!("[callback] LoadModule! module={:?} nome={}", module, name);
             // heurística: não é uma dll do próprio .NET (framework), então é do usuário
             if !name.starts_with("/usr/share/dotnet/") {
+                // See USER_MODULE's doc comment above: this is what
+                // cb_step_complete compares against before trusting
+                // LOCAL_NAME_RESOLVER/LINE_RESOLVER's rid-keyed lookups —
+                // both resolve against the user's own PDB, which only
+                // describes methods in THIS module.
+                USER_MODULE = module;
                 eprintln!("[callback]   é o módulo do usuário! procurando o método de entrada de verdade (EnumTypeDefs/EnumMethods, sem token fixo)...");
                 match get_metadata_import(module) {
                     Ok(metadata) => match find_entry_point_token(metadata) {

@@ -239,7 +239,51 @@ pub struct RunOptions {
 impl Default for RunOptions {
     fn default() -> Self {
         Self {
-            time_limit_secs: env::var("SPIKE_TIME_LIMIT").unwrap_or_else(|_| "10".into()),
+            // Renamed from the spike-era SPIKE_TIME_LIMIT to a name that
+            // reads as a deliberate production knob, not a leftover debug
+            // var — and split per-language (java.rs / csharp.rs each read
+            // their OWN env var now) because the two runtimes have genuinely
+            // different per-instrumented-step costs, not just historical
+            // spike defaults that happened to differ.
+            //
+            // Default 25s, derived from real measurements (see tasks.md
+            // "Timeout de execução"), not picked by feel. Product model is
+            // trace-and-replay (single wall-clock budget, no interactive
+            // per-step session — see spec.md/tasks.md "wall-clock único"),
+            // and the 5,000-step cap (STEP_EVENT_CAP) already bounds
+            // instrumentation scope, so this timeout's only job is to give a
+            // LEGITIMATE small/medium program (the product's explicit scope,
+            // see tasks.md "GO, com escopo explícito") enough wall-clock to
+            // either finish or hit that cap — not to let large-scale inputs
+            // finish, which is explicitly out of scope.
+            //
+            // Measured worst case (docker run, --privileged --cgroupns=host,
+            // this exact image): a moderately complex program (nested loops,
+            // a 60-element array, a helper method call, string
+            // concatenation in the hot path — NOT a trivial flat loop) hit
+            // the 5,000-event cap in ~8.0-8.9s wall time. A trivial flat
+            // 20k-iteration loop (BigCountLoop.java) hit the same cap much
+            // faster, ~5.3s — confirming per-step extraction cost (locals +
+            // stack serialization under JDI), not iteration count alone, is
+            // what drives wall time here, consistent with the ~1,580 ev/s
+            // baseline already documented in tasks.md ("Medido overhead real
+            // do JDI") degrading further (~550-950 ev/s observed here) under
+            // richer locals. 25s gives ~2.8x margin over the ~8.9s worst
+            // case, enough to absorb real host-load variance already
+            // observed empirically (the same simple BigCountLoop.java was
+            // ~1.55x slower in this measurement run, 5.3s, than the
+            // ~3.4s previously documented in tasks.md under different host
+            // load) without leaving a truly-infinite malicious loop tying up
+            // a sandbox slot for an unreasonable time.
+            //
+            // Deliberately HIGHER than csharp.rs's default (see that file's
+            // identical comment) — the OLD spike defaults had this backwards
+            // (Java 10s < C# 15s) despite Java measurably needing MORE
+            // margin: this Java worst case (~8.9s) sits much closer to
+            // breaching the OLD 10s budget than C#'s worst case (~3.5s) ever
+            // came to breaching ITS old 15s budget. Corrected here based on
+            // real per-language throughput, not carried over from the spike.
+            time_limit_secs: env::var("JAVA_TIME_LIMIT_SECS").unwrap_or_else(|_| "25".into()),
             sample_n: env::var("SPIKE_SAMPLE").unwrap_or_else(|_| "1".into()),
         }
     }
