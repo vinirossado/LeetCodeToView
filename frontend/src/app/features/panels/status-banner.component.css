@@ -6,6 +6,13 @@
   border: 1px solid var(--c2c-error, #c0392b);
   font-size: 0.85rem;
   font-weight: 500;
+  /* Real compiler/runtime output embedded in this message (javac multi-line
+   * errors with `^` column markers, stack traces — see ErrorEvent.message)
+   * relies on its own newlines/spacing to stay legible; default text
+   * wrapping collapsed all of that into one run-on paragraph. pre-wrap
+   * preserves it while still wrapping long lines, and has no visible effect
+   * on the single-line Portuguese messages the other terminal events use. */
+  white-space: pre-wrap;
 }
 
 .banner.warning {

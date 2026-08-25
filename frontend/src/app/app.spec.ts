@@ -114,6 +114,49 @@ describe('App', () => {
     expect(fixture.componentInstance.code().length).toBeGreaterThan(0);
   });
 
+  describe('empty code (UX audit quick win #1)', () => {
+    // "code is required" (the API's 422 for blank code — ExecutionsResource
+    // `code.isBlank()`) used to be reachable and rendered as a bare,
+    // untranslated English string via the generic runError() path. Since
+    // onRun() is the ONLY caller that submits user-controlled code (both to
+    // POST /executions and to the analysis endpoint), and every starter
+    // example is always non-blank, disabling Run whenever the editor is
+    // blank makes that error state fully unreachable instead of just
+    // prettier — see app.ts's isCodeBlank doc comment.
+
+    it('isCodeBlank is true for empty code and for whitespace-only code, matching the API\'s isBlank() check', () => {
+      const fixture = create();
+      fixture.componentInstance.code.set('');
+      expect(fixture.componentInstance.isCodeBlank()).toBe(true);
+
+      fixture.componentInstance.code.set('   \n\t  ');
+      expect(fixture.componentInstance.isCodeBlank()).toBe(true);
+
+      fixture.componentInstance.code.set('int x = 1;');
+      expect(fixture.componentInstance.isCodeBlank()).toBe(false);
+    });
+
+    it('the Run button is disabled in the DOM when the editor is emptied out', () => {
+      const fixture = create();
+      fixture.componentInstance.code.set('   ');
+      fixture.detectChanges();
+
+      const runBtn = fixture.nativeElement.querySelector('.run-btn') as HTMLButtonElement;
+      expect(runBtn.disabled).toBe(true);
+    });
+
+    it('the Run button is enabled again once non-blank code is typed back in', () => {
+      const fixture = create();
+      fixture.componentInstance.code.set('');
+      fixture.detectChanges();
+      fixture.componentInstance.code.set('int x = 1;');
+      fixture.detectChanges();
+
+      const runBtn = fixture.nativeElement.querySelector('.run-btn') as HTMLButtonElement;
+      expect(runBtn.disabled).toBe(false);
+    });
+  });
+
   it('runs an execution and streams step events into the trace store', () => {
     const fixture = create();
     fixture.componentInstance.onRun();
@@ -289,6 +332,74 @@ describe('App', () => {
       expect(fixture.componentInstance.shareCopied()).toBe(false);
     });
 
+    // UX audit quick win #2: a rejected writeText() (denied permission,
+    // insecure/non-HTTPS context) used to leave the button completely
+    // unchanged — indistinguishable from the click not having registered at
+    // all. shareCopyFailed + shareFallbackUrl give it a visible, distinct
+    // failure state instead.
+    describe('clipboard write failure (UX audit quick win #2)', () => {
+      function stubRejectingClipboard() {
+        const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+        Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+        return writeText;
+      }
+
+      async function runAndStartShare(fixture: ReturnType<typeof create>) {
+        fixture.componentInstance.onRun();
+        createExecution$.next({ execution_id: 'exec-1' });
+        fixture.detectChanges();
+      }
+
+      it('sets shareCopyFailed and exposes the raw URL as a fallback when the clipboard write rejects', async () => {
+        stubRejectingClipboard();
+        const fixture = create();
+        await runAndStartShare(fixture);
+
+        expect(fixture.componentInstance.shareCopyFailed()).toBe(false);
+        expect(fixture.componentInstance.shareFallbackUrl()).toBeNull();
+
+        await fixture.componentInstance.onCopyShareLink();
+
+        expect(fixture.componentInstance.shareCopyFailed()).toBe(true);
+        const fallback = fixture.componentInstance.shareFallbackUrl();
+        expect(fallback).not.toBeNull();
+        expect(new URL(fallback!).searchParams.get('execution')).toBe('exec-1');
+      });
+
+      it('renders a distinct failure label on the button and a selectable fallback input in the DOM', async () => {
+        stubRejectingClipboard();
+        const fixture = create();
+        await runAndStartShare(fixture);
+
+        await fixture.componentInstance.onCopyShareLink();
+        fixture.detectChanges();
+
+        const shareBtn = fixture.nativeElement.querySelector('.share-btn') as HTMLButtonElement;
+        expect(shareBtn.textContent).toContain('Falha ao copiar');
+        expect(shareBtn.classList.contains('copy-failed')).toBe(true);
+
+        const fallbackInput = fixture.nativeElement.querySelector('.share-fallback-input') as HTMLInputElement | null;
+        expect(fallbackInput).not.toBeNull();
+        expect(fallbackInput!.value).toContain('exec-1');
+      });
+
+      it('a subsequent successful copy clears the failure state and the fallback link', async () => {
+        const writeText = stubRejectingClipboard();
+        const fixture = create();
+        await runAndStartShare(fixture);
+
+        await fixture.componentInstance.onCopyShareLink();
+        expect(fixture.componentInstance.shareCopyFailed()).toBe(true);
+
+        writeText.mockResolvedValue(undefined);
+        await fixture.componentInstance.onCopyShareLink();
+
+        expect(fixture.componentInstance.shareCopyFailed()).toBe(false);
+        expect(fixture.componentInstance.shareFallbackUrl()).toBeNull();
+        expect(fixture.componentInstance.shareCopied()).toBe(true);
+      });
+    });
+
     it('does nothing when there is no execution yet (button is not shown in app.html for this case)', async () => {
       const writeText = stubClipboard();
       const fixture = create();
@@ -296,6 +407,58 @@ describe('App', () => {
       await fixture.componentInstance.onCopyShareLink();
 
       expect(writeText).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('C# step-through note (UX audit quick win #4: collapsible/dismissible)', () => {
+    function switchToCsharp(fixture: ReturnType<typeof create>) {
+      fixture.componentInstance.onLanguageChange({ target: { value: 'csharp' } } as unknown as Event);
+      fixture.detectChanges();
+    }
+
+    it('is expanded (not collapsed) by default when nothing was persisted yet', () => {
+      const fixture = create();
+      switchToCsharp(fixture);
+
+      expect(fixture.componentInstance.csharpNoteCollapsed()).toBe(false);
+      const note = fixture.nativeElement.querySelector('.csharp-note') as HTMLElement;
+      expect(note.textContent).toContain('local_N');
+    });
+
+    it('toggleCsharpNote collapses it and persists that to localStorage', () => {
+      const fixture = create();
+      switchToCsharp(fixture);
+
+      fixture.componentInstance.toggleCsharpNote();
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.csharpNoteCollapsed()).toBe(true);
+      expect(localStorage.getItem('code2complexity.csharpNoteDismissed')).toBe('true');
+
+      // Full text no longer forced on screen, but the toggle to bring it
+      // back is still there.
+      const note = fixture.nativeElement.querySelector('.csharp-note') as HTMLElement;
+      expect(note.textContent).not.toContain('ICorDebugStepper');
+      expect(fixture.nativeElement.querySelector('.csharp-note-toggle')).not.toBeNull();
+    });
+
+    it('a dismissal from a previous session stays collapsed on the next load', () => {
+      localStorage.setItem('code2complexity.csharpNoteDismissed', 'true');
+      const fixture = create();
+      switchToCsharp(fixture);
+
+      expect(fixture.componentInstance.csharpNoteCollapsed()).toBe(true);
+    });
+
+    it('toggling back open re-persists the expanded state, so the full note is still reachable and stays open on reload', () => {
+      localStorage.setItem('code2complexity.csharpNoteDismissed', 'true');
+      const fixture = create();
+      switchToCsharp(fixture);
+
+      fixture.componentInstance.toggleCsharpNote();
+
+      expect(fixture.componentInstance.csharpNoteCollapsed()).toBe(false);
+      expect(localStorage.getItem('code2complexity.csharpNoteDismissed')).toBe('false');
     });
   });
 

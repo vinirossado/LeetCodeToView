@@ -10,20 +10,37 @@
         }
       </select>
     </label>
-    <button type="button" class="run-btn" (click)="onRun()" [disabled]="isBusy()">
+    <button
+      type="button"
+      class="run-btn"
+      (click)="onRun()"
+      [disabled]="isBusy() || isCodeBlank()"
+      [title]="isCodeBlank() ? 'Escreva algum código antes de executar' : ''"
+    >
       {{ isBusy() ? 'Executando…' : 'Run' }}
     </button>
     @if (executionId()) {
-      <span class="execution-id">execution_id: {{ executionId() }}</span>
       <button
         type="button"
         class="share-btn"
         [class.copied]="shareCopied()"
+        [class.copy-failed]="shareCopyFailed()"
         (click)="onCopyShareLink()"
         title="Copiar link para compartilhar esta execução (válido só enquanto a API mantiver esta execução em memória)"
       >
-        {{ shareCopied() ? '✓ Link copiado' : 'Compartilhar' }}
+        {{ shareCopied() ? '✓ Link copiado' : shareCopyFailed() ? 'Falha ao copiar' : 'Compartilhar' }}
       </button>
+      @if (shareFallbackUrl(); as fallbackUrl) {
+        <input
+          class="share-fallback-input"
+          type="text"
+          readonly
+          [value]="fallbackUrl"
+          title="Não foi possível copiar automaticamente — selecione e copie o link manualmente"
+          (click)="$any($event.target).select()"
+        />
+      }
+      <span class="execution-id" [title]="'execution_id: ' + executionId()">execution_id: {{ executionId() }}</span>
     }
   </div>
 </header>
@@ -31,22 +48,41 @@
 <main class="layout" #layoutHost>
   <section class="editor-column" [style.width.%]="splitRatio() * 100">
     @if (language() === 'csharp') {
-      <p class="csharp-note">
-        Atenção: para C#, cada passo avança por linha de código fonte (via
-        <code>ICorDebugStepper::StepRange</code>, mesmo mecanismo que o JDI usa no Java), não mais
-        por instrução IL individual. Ainda assim, uma linha com múltiplas instruções separadas por
-        <code>;</code>, ou a linha de abertura de um método, pode aparecer destacada mais de uma
-        vez seguida — cada uma tem seu próprio ponto de sequência no <code>.pdb</code>. O depurador
-        também só para dentro do seu próprio código (modo "Just My Code" do ICorDebug) — chamadas
-        de framework, como a primeira <code>Console.WriteLine</code>, são atravessadas
-        automaticamente em vez de geradas passo a passo, então elas não poluem mais o trace. A
-        linha e os nomes de variável são lidos do arquivo <code>.pdb</code>, gerado na compilação;
-        a linha só cai de volta pro offset de IL cru em casos raros (trecho gerado pelo compilador
-        sem ponto de sequência real). Já os nomes de variável ainda podem aparecer como
-        <code>local_N</code> quando um slot não tem escopo descrito no <code>.pdb</code> (comum em
-        alguns locais gerados pelo compilador, ex: top-level statements) — isso é uma limitação
-        separada, independente da anterior. Ver painel de variáveis para detalhes.
-      </p>
+      <div class="csharp-note" [class.collapsed]="csharpNoteCollapsed()">
+        @if (csharpNoteCollapsed()) {
+          <button
+            type="button"
+            class="csharp-note-toggle"
+            (click)="toggleCsharpNote()"
+            title="Mostrar detalhes sobre o step-through em C# (StepRange, Just My Code, .pdb, local_N)"
+          >
+            ⓘ Nota sobre step-through em C# — mostrar detalhes
+          </button>
+        } @else {
+          <div class="csharp-note-header">
+            <span class="csharp-note-title">Nota sobre step-through em C#</span>
+            <button type="button" class="csharp-note-toggle" (click)="toggleCsharpNote()" title="Ocultar detalhes">
+              ocultar detalhes ✕
+            </button>
+          </div>
+          <p class="csharp-note-body">
+            Atenção: para C#, cada passo avança por linha de código fonte (via
+            <code>ICorDebugStepper::StepRange</code>, mesmo mecanismo que o JDI usa no Java), não mais
+            por instrução IL individual. Ainda assim, uma linha com múltiplas instruções separadas por
+            <code>;</code>, ou a linha de abertura de um método, pode aparecer destacada mais de uma
+            vez seguida — cada uma tem seu próprio ponto de sequência no <code>.pdb</code>. O depurador
+            também só para dentro do seu próprio código (modo "Just My Code" do ICorDebug) — chamadas
+            de framework, como a primeira <code>Console.WriteLine</code>, são atravessadas
+            automaticamente em vez de geradas passo a passo, então elas não poluem mais o trace. A
+            linha e os nomes de variável são lidos do arquivo <code>.pdb</code>, gerado na compilação;
+            a linha só cai de volta pro offset de IL cru em casos raros (trecho gerado pelo compilador
+            sem ponto de sequência real). Já os nomes de variável ainda podem aparecer como
+            <code>local_N</code> quando um slot não tem escopo descrito no <code>.pdb</code> (comum em
+            alguns locais gerados pelo compilador, ex: top-level statements) — isso é uma limitação
+            separada, independente da anterior. Ver painel de variáveis para detalhes.
+          </p>
+        }
+      </div>
     }
 
     <div class="editor-shell">

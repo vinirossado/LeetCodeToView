@@ -71,10 +71,40 @@
   cursor: default;
 }
 
+/* Demoted per UX audit quick win #5: still present (useful for bug reports/
+ * correlating with server logs) but visually out of the way of Run/
+ * Compartilhar — small, muted text, brightening on hover of the id itself
+ * so it doesn't compete for attention the rest of the time. The full id is
+ * always available via the title tooltip (native browser hover), so only
+ * `opacity`/`color` change here — NOT `max-width` or anything else that
+ * affects layout: an earlier version also grew max-width on hover, which
+ * inside this flex row could shift the element out from under the pointer
+ * mid-transition, un-hovering it, snapping back, and repeating — a real,
+ * empirically-confirmed hover/layout thrash loop (Playwright's own
+ * "element is not stable" retry loop caught it), not just a test artifact. */
 .execution-id {
+  display: inline-block;
   font-family: var(--c2c-font-mono);
-  font-size: 0.75rem;
+  font-size: 0.65rem;
   color: var(--c2c-text-muted);
+  opacity: 0.55;
+  cursor: help;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 16ch;
+  vertical-align: middle;
+  transition: opacity 0.12s ease;
+}
+
+/* Deliberately scoped to hovering the id itself, NOT `.run-bar:hover` —
+ * the run-bar also contains Run/Compartilhar, and the pointer is left
+ * resting on Run right after every click (Playwright's real-mouse-move
+ * click behavior confirmed this empirically), which would have made the
+ * id snap back to full prominence after every single run — defeating the
+ * demotion this is meant to achieve. */
+.execution-id:hover {
+  opacity: 1;
 }
 
 .share-btn {
@@ -103,6 +133,32 @@
   color: var(--c2c-success);
   border-color: var(--c2c-success);
   background: var(--c2c-success-bg);
+}
+
+/* UX audit quick win #2: visible failure state for when
+ * navigator.clipboard.writeText() rejects (denied permission, insecure/
+ * non-HTTPS context) — mirrors .share-btn.copied's success styling so the
+ * two outcomes read as clearly distinct, not just "button did nothing". */
+.share-btn.copy-failed {
+  color: var(--c2c-error);
+  border-color: var(--c2c-error);
+  background: var(--c2c-error-bg);
+}
+
+/* Manual-copy fallback shown alongside the failure state above, holding
+ * the raw share URL so the user can still select-and-copy it themselves. */
+.share-fallback-input {
+  width: 16ch;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--c2c-bg-panel);
+  color: var(--c2c-text-secondary);
+  border: 1px solid var(--c2c-error);
+  border-radius: var(--c2c-radius-sm);
+  padding: 0.3em 0.5em;
+  font: inherit;
+  font-family: var(--c2c-font-mono);
+  font-size: 0.7rem;
 }
 
 .layout {
@@ -227,6 +283,49 @@
   margin: 0;
 }
 
+.csharp-note-body {
+  margin: var(--c2c-space-2) 0 0;
+}
+
+.csharp-note-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--c2c-space-2);
+}
+
+.csharp-note-title {
+  font-weight: 600;
+}
+
+/* Collapsed state: a single compact line instead of the full disclaimer,
+ * so it stops costing vertical space above the editor on every C# run once
+ * the user has already seen/dismissed it once (persisted, see
+ * CSHARP_NOTE_COLLAPSED_KEY in app.ts). The full text is always one click
+ * away again via the same toggle. */
+.csharp-note.collapsed {
+  padding: var(--c2c-space-1) var(--c2c-space-3);
+}
+
+.csharp-note-toggle {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.csharp-note.collapsed .csharp-note-toggle {
+  text-decoration: none;
+  width: 100%;
+  text-align: left;
+}
+
 .csharp-note code {
   font-family: var(--c2c-font-mono);
 }
@@ -234,4 +333,7 @@
 .error {
   color: var(--c2c-error);
   font-size: 0.85rem;
+  /* Preserves newlines/column-marker spacing in raw compiler/runtime
+   * output instead of collapsing it into a single run-on line. */
+  white-space: pre-wrap;
 }

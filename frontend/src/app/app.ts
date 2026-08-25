@@ -59,6 +59,19 @@ const EXECUTION_NOT_FOUND_ERROR_MESSAGE = 'execution not found';
 /** localStorage key persisting the user's chosen editor/panels split ratio. */
 const SPLIT_RATIO_KEY = 'code2complexity.splitRatio';
 
+/**
+ * localStorage key remembering whether the C# step-through disclaimer
+ * (.csharp-note, see app.html) has been collapsed by the user. Mirrors
+ * SPLIT_RATIO_KEY's "read current value on boot, persist it back on every
+ * change" pattern rather than a one-shot "dismissed forever" flag: toggling
+ * back open (e.g. to re-read the local_N/PDB details) also persists, so a
+ * later reload doesn't re-collapse something the user just chose to expand
+ * again. UX audit quick win #4 — the note itself is real, useful
+ * information (not decorative), it just shouldn't cost vertical space on
+ * every single C# run once someone has already read it.
+ */
+const CSHARP_NOTE_COLLAPSED_KEY = 'code2complexity.csharpNoteDismissed';
+
 /** Fraction of the layout width given to the editor column; the resizer is clamped within this range. */
 const MIN_SPLIT_RATIO = 0.3;
 const MAX_SPLIT_RATIO = 0.75;
@@ -134,6 +147,23 @@ export class App {
   readonly shareCopied = signal<boolean>(false);
   private shareCopiedTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  // UX audit quick win #2: the Clipboard API write can reject (permission
+  // denied, insecure context/non-HTTPS origin) — previously that left the
+  // button completely unchanged with zero feedback, indistinguishable from
+  // "nothing happened because I didn't actually click it". shareCopyFailed
+  // drives a brief "falha ao copiar" state in the same slot shareCopied
+  // uses for success; shareFallbackUrl additionally surfaces the raw link
+  // in a selectable field so the user can still copy it by hand.
+  readonly shareCopyFailed = signal<boolean>(false);
+  readonly shareFallbackUrl = signal<string | null>(null);
+  private shareCopyFailedTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // UX audit quick win #4: whether the C# step-through disclaimer is
+  // collapsed to a one-line summary. Initialized from localStorage so a
+  // user who has already collapsed it once doesn't see the full banner
+  // (and pay its vertical-space cost) on every subsequent C# run.
+  readonly csharpNoteCollapsed = signal<boolean>(this.loadCsharpNoteCollapsed());
+
   // Set for exactly one effect run right after booting from a shared link
   // (?execution=<id>), so that one-time load does not get written into
   // LAST_EXECUTION_ID_KEY — see the constructor comment for why. Deliberately
@@ -180,6 +210,20 @@ export class App {
     const terminal = this.terminalEvent();
     return terminal?.type === 'error' ? terminal.message : null;
   });
+
+  /**
+   * UX audit quick win #1: whitespace-only (including empty) code is the
+   * ONLY way the previously-reachable "code is required" 422 could ever
+   * happen — onRun() is the sole caller of both POST /executions
+   * (ExecutionsResource.create's `code.isBlank()` check) and the analysis
+   * endpoint (AnalysisResource, same check) with user-controlled code, and
+   * every language's starter example is always non-blank, so switching
+   * languages can never produce a blank editor on its own. Disabling Run
+   * on this condition (matching Java's String#isBlank() semantics: empty
+   * OR all-whitespace, not just empty) therefore makes that error state
+   * fully unreachable from the UI, rather than just reachable-but-prettier.
+   */
+  readonly isCodeBlank = computed(() => this.code().trim().length === 0);
 
   constructor() {
     // A shared link (?execution=<id>) always wins over the localStorage
@@ -333,11 +377,22 @@ export class App {
     const url = this.buildShareUrl(id);
     try {
       await navigator.clipboard.writeText(url);
+      this.shareCopyFailed.set(false);
+      this.shareFallbackUrl.set(null);
+      if (this.shareCopyFailedTimeout) clearTimeout(this.shareCopyFailedTimeout);
       this.shareCopied.set(true);
       if (this.shareCopiedTimeout) clearTimeout(this.shareCopiedTimeout);
       this.shareCopiedTimeout = setTimeout(() => this.shareCopied.set(false), 2000);
     } catch {
+      // Clipboard API rejected (permission denied, insecure/non-HTTPS
+      // context, etc.) — surface it instead of leaving the button
+      // unchanged with no feedback, and keep the raw URL visible/selectable
+      // as a manual-copy fallback since the automatic path just failed.
       this.shareCopied.set(false);
+      this.shareCopyFailed.set(true);
+      this.shareFallbackUrl.set(url);
+      if (this.shareCopyFailedTimeout) clearTimeout(this.shareCopyFailedTimeout);
+      this.shareCopyFailedTimeout = setTimeout(() => this.shareCopyFailed.set(false), 4000);
     }
   }
 
@@ -392,5 +447,24 @@ export class App {
       return stored;
     }
     return DEFAULT_SPLIT_RATIO;
+  }
+
+  /**
+   * Flips the C# disclaimer between its full text and a compact one-line
+   * summary, persisting the new state so it's remembered on the next visit
+   * (see CSHARP_NOTE_COLLAPSED_KEY's doc comment for why this persists both
+   * directions instead of a one-shot "dismissed forever" flag).
+   */
+  toggleCsharpNote(): void {
+    const collapsed = !this.csharpNoteCollapsed();
+    this.csharpNoteCollapsed.set(collapsed);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(CSHARP_NOTE_COLLAPSED_KEY, String(collapsed));
+    }
+  }
+
+  private loadCsharpNoteCollapsed(): boolean {
+    if (typeof localStorage === 'undefined') return false;
+    return localStorage.getItem(CSHARP_NOTE_COLLAPSED_KEY) === 'true';
   }
 }

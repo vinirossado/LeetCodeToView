@@ -33,4 +33,7 @@ pre {
   color: var(--c2c-error);
   font-weight: 600;
   margin: var(--c2c-space-3) 0 0;
+  /* Preserves newlines/column-marker spacing in raw compiler/runtime
+   * output instead of collapsing it into a single run-on line. */
+  white-space: pre-wrap;
 }
