@@ -1,4 +1,5 @@
-import { Component, computed, input } from '@angular/core';
+import { Component, computed, input, output } from '@angular/core';
+import type { FrameInfo } from '../../core/models/execution-event.model';
 
 /**
  * Renders the call stack of the currently viewed step. Real bug found and
@@ -19,6 +20,19 @@ import { Component, computed, input } from '@angular/core';
  * real frame was there, just sorted last. Fixed by rendering the backend's
  * order directly (already innermost-first, which is what a call-stack panel
  * should show on top).
+ *
+ * Click-to-inspect (Python-Tutor-inspired recursion-clarity item,
+ * tasks.md): when the step's `frames` array is present (JAVA ONLY for
+ * now — see execution-event.model.ts's `StepEvent.frames` doc comment),
+ * each row becomes a real button; clicking it emits `frameSelect` with
+ * that frame's index, and app.ts wires that into a shared
+ * `selectedFrameIndex` signal the Variables panel also reads, so a
+ * clicked frame's own locals are what gets shown there — instead of
+ * always only the innermost frame's, no matter how deep the recursion.
+ * For C#/Ruby traces (no `frames`), this falls back to the previous
+ * plain, non-interactive list — there is no per-frame data to show yet,
+ * so no click affordance is offered rather than one that would silently
+ * do nothing.
  */
 @Component({
   selector: 'app-call-stack-panel',
@@ -28,6 +42,17 @@ import { Component, computed, input } from '@angular/core';
 })
 export class CallStackPanelComponent {
   readonly stack = input<string[] | null>(null);
+  readonly frames = input<FrameInfo[] | null | undefined>(null);
+  readonly selectedFrameIndex = input<number>(0);
 
-  readonly frames = computed(() => this.stack() ?? []);
+  readonly frameSelect = output<number>();
+
+  readonly names = computed(() => this.stack() ?? []);
+  /** Whether per-frame locals are available to click through (Java only for now). */
+  readonly hasFrameData = computed(() => (this.frames()?.length ?? 0) > 0);
+
+  onSelect(index: number): void {
+    if (!this.hasFrameData()) return;
+    this.frameSelect.emit(index);
+  }
 }

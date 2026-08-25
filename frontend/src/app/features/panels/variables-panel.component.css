@@ -11,6 +11,17 @@ h3 {
   color: var(--c2c-text-muted);
 }
 
+.frame-context {
+  font-size: 0.8rem;
+  color: var(--c2c-text-muted);
+  margin: 0 0 var(--c2c-space-3);
+}
+
+.frame-context strong {
+  color: var(--c2c-accent);
+  font-family: var(--c2c-font-mono);
+}
+
 .disclaimer {
   font-size: 0.8rem;
   color: var(--c2c-warning);

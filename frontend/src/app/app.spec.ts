@@ -23,6 +23,22 @@ const editorInstance = {
   dispose: vi.fn(),
   getModel: vi.fn(() => ({ getLineCount: () => 10 })),
 };
+
+// tabFocusMode fake mirrors the real global Monaco singleton (see
+// code-editor.component.spec.ts's doc comment for why it's imported/mocked
+// directly rather than via editor.trigger()/getAction()). App doesn't
+// exercise this behavior itself, but CodeEditorComponent's real
+// ngAfterViewInit calls into it unconditionally, so the mock needs to exist.
+let fakeTabFocusMode = false;
+vi.mock('monaco-editor/esm/vs/editor/browser/config/tabFocus.js', () => ({
+  TabFocus: {
+    getTabFocusMode: () => fakeTabFocusMode,
+    setTabFocusMode: (v: boolean) => {
+      fakeTabFocusMode = v;
+    },
+  },
+}));
+
 vi.mock('monaco-editor', () => {
   class FakeRange {
     constructor(
@@ -56,6 +72,7 @@ describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    fakeTabFocusMode = false;
 
     createExecution$ = new Subject();
     getTrace$ = new Subject();
@@ -112,6 +129,47 @@ describe('App', () => {
     expect(fixture.componentInstance.language()).toBe('csharp');
     expect(fixture.componentInstance.code()).not.toContain('algo que o usuário digitou em java');
     expect(fixture.componentInstance.code().length).toBeGreaterThan(0);
+  });
+
+  describe('switching language resets stale execution state (UX audit fix)', () => {
+    it('clears executionId/trace/complexity result immediately on language switch, before the next Run', () => {
+      const fixture = create();
+      fixture.componentInstance.onRun();
+      createExecution$.next({ execution_id: 'exec-42' });
+      wsEvents$.next(step(1));
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.executionId()).toBe('exec-42');
+      expect(fixture.componentInstance.hasStarted()).toBe(true);
+      expect(fixture.componentInstance.analysisOutcome()).not.toBeNull();
+
+      fixture.componentInstance.onLanguageChange({ target: { value: 'csharp' } } as unknown as Event);
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.executionId()).toBeNull();
+      expect(fixture.componentInstance.hasStarted()).toBe(false);
+      expect(fixture.componentInstance.analysisOutcome()).toBeNull();
+    });
+  });
+
+  describe('restoring the actual submitted code on reconnect (UX audit fix)', () => {
+    it('applies the real language+code from GET /trace on boot-time reconnect, instead of leaving the Java starter example on screen', () => {
+      localStorage.setItem('code2complexity.lastExecutionId', 'exec-77');
+      const fixture = create();
+
+      expect(fixture.componentInstance.language()).toBe('java'); // still the default, trace hasn't resolved yet
+      getTrace$.next({
+        execution_id: 'exec-77',
+        status: 'completed',
+        language: 'ruby',
+        code: 'puts "restored"',
+        events: [],
+      });
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.language()).toBe('ruby');
+      expect(fixture.componentInstance.code()).toBe('puts "restored"');
+    });
   });
 
   describe('empty code (UX audit quick win #1)', () => {
@@ -200,7 +258,7 @@ describe('App', () => {
   it('on init, loads a previously persisted execution id via GET /trace', () => {
     localStorage.setItem('code2complexity.lastExecutionId', 'exec-old');
     const fixture = create();
-    getTrace$.next({ execution_id: 'exec-old', status: 'completed', events: [step(1), step(2)] });
+    getTrace$.next({ execution_id: 'exec-old', status: 'completed', language: 'java', code: 'int x = 1;', events: [step(1), step(2)] });
     fixture.detectChanges();
 
     expect(fixture.componentInstance.executionId()).toBe('exec-old');
@@ -231,7 +289,7 @@ describe('App', () => {
     it('on init, a ?execution=<id> query param loads that execution via GET /trace', () => {
       window.history.pushState({}, '', '/?execution=exec-shared');
       const fixture = create();
-      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', events: [step(1), step(2), step(3)] });
+      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', language: 'java', code: 'int x = 1;', events: [step(1), step(2), step(3)] });
       fixture.detectChanges();
 
       expect(fixture.componentInstance.executionId()).toBe('exec-shared');
@@ -246,7 +304,7 @@ describe('App', () => {
       // Only the shared id's GET /trace should have been requested — the
       // fixture's getTrace$ stub is shared across both ids, so assert via
       // what actually reaches the component instead of call counting.
-      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', events: [step(1)] });
+      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', language: 'java', code: 'int x = 1;', events: [step(1)] });
       fixture.detectChanges();
 
       expect(fixture.componentInstance.executionId()).toBe('exec-shared');
@@ -256,7 +314,7 @@ describe('App', () => {
       localStorage.setItem('code2complexity.lastExecutionId', 'exec-own-last');
       window.history.pushState({}, '', '/?execution=exec-shared');
       const fixture = create();
-      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', events: [step(1)] });
+      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', language: 'java', code: 'int x = 1;', events: [step(1)] });
       fixture.detectChanges();
 
       expect(fixture.componentInstance.executionId()).toBe('exec-shared');
@@ -266,7 +324,7 @@ describe('App', () => {
     it('a subsequent Run after visiting a shared link persists normally (the suppression is one-shot)', () => {
       window.history.pushState({}, '', '/?execution=exec-shared');
       const fixture = create();
-      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', events: [step(1)] });
+      getTrace$.next({ execution_id: 'exec-shared', status: 'completed', language: 'java', code: 'int x = 1;', events: [step(1)] });
       fixture.detectChanges();
 
       fixture.componentInstance.onRun();

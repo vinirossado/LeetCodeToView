@@ -1,5 +1,8 @@
 <section class="panel">
   <h3>Variáveis locais</h3>
+  @if (selectedFrameName(); as frameName) {
+    <p class="frame-context">Frame selecionado: <strong>{{ frameName }}</strong></p>
+  }
   @if (hasPositionalFallback()) {
     <p class="disclaimer">
       Sem informação de PDB para este ponto: os nomes com prefixo "local_" abaixo são posições,

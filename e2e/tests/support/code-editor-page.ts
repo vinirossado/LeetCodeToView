@@ -37,6 +37,19 @@ export class CodeEditorPage {
     return this.page.locator('.lang-select');
   }
 
+  /** Visible "Tab moves focus / Tab indenta código" toggle next to the editor (WCAG 2.1.2 keyboard-trap fix). */
+  get tabFocusToggle(): Locator {
+    return this.page.locator('.tab-focus-toggle');
+  }
+
+  callStackFrameButtons(): Locator {
+    return this.page.locator('button.frame-btn');
+  }
+
+  get frameContextLabel(): Locator {
+    return this.page.locator('.frame-context');
+  }
+
   get csharpNote(): Locator {
     return this.page.locator('.csharp-note');
   }

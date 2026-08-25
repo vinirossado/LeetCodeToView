@@ -85,7 +85,7 @@ describe('ExecutionSessionService', () => {
       session.load('exec-99');
       expect(session.isBusy()).toBe(true);
 
-      getTrace$.next({ execution_id: 'exec-99', status: 'completed', events: [step(1)] });
+      getTrace$.next({ execution_id: 'exec-99', status: 'completed', language: 'java', code: 'int x = 1;', events: [step(1)] });
       expect(session.isBusy()).toBe(false);
     });
   });
@@ -158,6 +158,8 @@ describe('ExecutionSessionService', () => {
       getTrace$.next({
         execution_id: 'exec-99',
         status: 'completed',
+        language: 'java',
+        code: 'int x = 1;',
         events: [step(1), step(2)],
       });
 
@@ -171,6 +173,8 @@ describe('ExecutionSessionService', () => {
       getTrace$.next({
         execution_id: 'exec-99',
         status: 'running',
+        language: 'java',
+        code: 'int x = 1;',
         events: [step(1)],
       });
 
@@ -199,6 +203,51 @@ describe('ExecutionSessionService', () => {
 
       expect(trace.status()).toBe('failed');
       expect(session.runError()).toBe('execution not found');
+    });
+
+    it('exposes the real submitted language+code from GET /trace as restoredLanguage/restoredCode — UX audit fix: a reload used to keep showing whatever starter example was in the editor next to a reconnected trace it could never have produced', () => {
+      expect(session.restoredLanguage()).toBeNull();
+      expect(session.restoredCode()).toBeNull();
+
+      session.load('exec-99');
+      getTrace$.next({
+        execution_id: 'exec-99',
+        status: 'completed',
+        language: 'csharp',
+        code: 'Console.WriteLine("hi");',
+        events: [step(1)],
+      });
+
+      expect(session.restoredLanguage()).toBe('csharp');
+      expect(session.restoredCode()).toBe('Console.WriteLine("hi");');
+    });
+  });
+
+  describe('reset()', () => {
+    it('clears executionId/runError/isBusy and the trace store without issuing any request — used on language switch (UX audit fix)', () => {
+      session.run('java', 'int x = 1;');
+      createExecution$.next({ execution_id: 'exec-42' });
+      wsEvents$.next(step(1));
+      expect(session.executionId()).toBe('exec-42');
+      expect(trace.totalSteps()).toBe(1);
+
+      session.reset();
+
+      expect(session.executionId()).toBeNull();
+      expect(session.runError()).toBeNull();
+      expect(session.isBusy()).toBe(false);
+      expect(trace.totalSteps()).toBe(0);
+      expect(trace.hasStarted()).toBe(false);
+    });
+
+    it('unsubscribes any in-flight WebSocket stream so late events from the previous language do not leak into the reset state', () => {
+      session.run('java', 'int x = 1;');
+      createExecution$.next({ execution_id: 'exec-42' });
+
+      session.reset();
+      wsEvents$.next(step(1)); // late event from the run() that was just reset away
+
+      expect(trace.totalSteps()).toBe(0);
     });
   });
 });

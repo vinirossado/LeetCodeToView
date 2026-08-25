@@ -6,10 +6,59 @@ import {
   effect,
   input,
   output,
+  signal,
   viewChild,
 } from '@angular/core';
 import * as monaco from 'monaco-editor';
+// Monaco's real, internal `tabFocusMode` singleton (browser/config/
+// tabFocus.js — NOT part of the public `monaco.*` API surface; ambient
+// typing for it lives in src/types/monaco-internal.d.ts, since monaco-editor
+// only ships a single bundled editor.api.d.ts, not per-file types).
+// Imported directly instead of going through the "official", documented
+// path (triggering `editor.action.toggleTabFocusMode` via
+// `editor.trigger(...)`, or the real Ctrl+M / Ctrl+Shift+M keybinding it's
+// bound to) because, in THIS exact production build (Angular's esbuild
+// pipeline bundling the `monaco-editor` npm package), that documented path
+// was found to be silently non-functional — confirmed empirically against
+// a real running instance: `editorInstance.getAction('editor.action.toggleTabFocusMode')`
+// returns null (never reaches the editor's own `_actions` map, since
+// `registerAction2`-based commands aren't `EditorAction` contributions),
+// AND, more fundamentally, pressing the REAL Ctrl+M keybinding inside a
+// live focused editor and then Tab still left focus trapped inside the
+// editor (i.e. not even Monaco's own built-in keybinding path works here,
+// not just this component's programmatic call) — see the regression test
+// this finding produced, e2e/tests/keyboard-accessibility.spec.ts.
+// `editorConfiguration.js` (the module that actually computes the
+// `tabFocusMode` EDITOR OPTION every instance reads) sources its value
+// from this EXACT singleton (`tabFocusMode: TabFocus.getTabFocusMode()`),
+// so importing it directly is not a workaround around Monaco's real
+// mechanism — since a deep import resolves to the identical file
+// editorConfiguration.js itself imports, this IS Monaco's real mechanism,
+// just reached directly instead of through the broken command-registry
+// indirection.
+import { TabFocus } from 'monaco-editor/esm/vs/editor/browser/config/tabFocus.js';
 import type { Language } from '../../core/models/language';
+
+/**
+ * localStorage key persisting whether Tab moves focus out of the editor
+ * (Monaco's built-in "Tab Moves Focus" mode) instead of inserting a tab
+ * character. Follows this app's `code2complexity.<name>` convention (see
+ * app.ts's LAST_EXECUTION_ID_KEY/SPLIT_RATIO_KEY).
+ *
+ * WCAG 2.1.2 "No Keyboard Trap" fix: Monaco's own default (tabFocusMode =
+ * false, toggled only via the undiscoverable Ctrl+M / Cmd+Shift+M shortcut,
+ * see https://github.com/microsoft/monaco-editor/wiki/Monaco-Editor-Accessibility-Guide)
+ * traps a keyboard-only user inside the editor permanently on first Tab —
+ * confirmed via a real Playwright pass (25+ consecutive Tabs never escaped
+ * the editor, so playback controls/breakpoints/panel tabs were unreachable).
+ * This app instead DEFAULTS tabFocusMode to true (Tab moves focus onward,
+ * same as every other control on the page) so a keyboard-only user is never
+ * trapped without already knowing Monaco's internals, and shows a small
+ * persistent toggle next to the editor (see the template) so a
+ * code-writing user who wants Tab-for-indent can switch it back — the
+ * choice then persists across reloads via TAB_FOCUS_MODE_KEY.
+ */
+const TAB_FOCUS_MODE_KEY = 'code2complexity.tabFocusMode';
 
 // NOTE: no `MonacoEnvironment.getWorker` is configured here. Monaco's web
 // workers are only needed for language *services* (autocomplete/diagnostics)
@@ -62,6 +111,20 @@ export class CodeEditorComponent implements AfterViewInit, OnDestroy {
   private editorInstance: monaco.editor.IStandaloneCodeEditor | null = null;
   private lineDecorationIds: string[] = [];
   private breakpointDecorationIds: string[] = [];
+
+  /**
+   * Mirrors Monaco's global `tabFocusMode` state for the template's visible
+   * toggle (see TAB_FOCUS_MODE_KEY's doc comment). Defaults to true so the
+   * toggle renders correctly-labeled even before ngAfterViewInit creates
+   * the actual editor instance.
+   */
+  readonly tabFocusMode = signal<boolean>(true);
+
+  /** Mirrors Monaco's real mac-specific keybinding (Control+Shift+M — the physical Ctrl key, not Cmd, same "WinCtrl" distinction VS Code itself uses) vs. Ctrl+M elsewhere. Used only to label the visible toggle. */
+  readonly tabFocusShortcutLabel =
+    typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform ?? '')
+      ? 'Control+Shift+M'
+      : 'Ctrl+M';
 
   constructor() {
     effect(() => {
@@ -122,6 +185,40 @@ export class CodeEditorComponent implements AfterViewInit, OnDestroy {
         this.breakpointToggle.emit(e.target.position.lineNumber);
       }
     });
+
+    this.applyTabFocusMode(this.loadTabFocusMode());
+  }
+
+  /**
+   * Flips Monaco's "Tab Moves Focus" mode — same effect pressing Ctrl+M /
+   * Ctrl+Shift+M inside the editor is SUPPOSED to have (see this file's
+   * `TabFocus` import doc comment for why that documented path was found
+   * to be silently broken in this exact production build, and why calling
+   * `TabFocus.setTabFocusMode` directly is used instead), just also
+   * reachable from a visible on-page control instead of only a keyboard
+   * shortcut a first-time user has no way to discover.
+   */
+  toggleTabFocusMode(): void {
+    const next = !TabFocus.getTabFocusMode();
+    TabFocus.setTabFocusMode(next);
+    this.tabFocusMode.set(next);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(TAB_FOCUS_MODE_KEY, String(next));
+    }
+  }
+
+  /** Applies `desired` directly. `TabFocus` is process-wide global state (shared by every Monaco instance on the page), not a per-editor option — there is no per-instance "set" to call instead. */
+  private applyTabFocusMode(desired: boolean): void {
+    TabFocus.setTabFocusMode(desired);
+    this.tabFocusMode.set(desired);
+  }
+
+  /** Reads the persisted tabFocusMode preference — true (Tab moves focus) is this app's own default, see TAB_FOCUS_MODE_KEY's doc comment. */
+  private loadTabFocusMode(): boolean {
+    if (typeof localStorage === 'undefined') return true;
+    const stored = localStorage.getItem(TAB_FOCUS_MODE_KEY);
+    if (stored === 'false') return false;
+    return true;
   }
 
   ngOnDestroy(): void {

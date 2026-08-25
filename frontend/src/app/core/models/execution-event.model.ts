@@ -3,11 +3,21 @@
 // exactly — field names and casing match the JSON on the wire (snake_case),
 // not idiomatic TypeScript, on purpose: this is a wire-format model.
 
+/** One stack frame's name + locals, as carried per-step by `frames` below. */
+export interface FrameInfo {
+  name: string;
+  locals: Record<string, unknown>;
+}
+
 /** One executed line, with the state captured at that point. */
 export interface StepEvent {
   type: 'step';
   line: number;
   /**
+   * Locals of the INNERMOST frame only (`frames[0].locals` when `frames` is
+   * present). Kept for backward compatibility with anything that doesn't
+   * care about per-frame inspection.
+   *
    * Java: real variable names ("x", "i").
    * C#: positional placeholders ("local_0", "local_1", ...) — no PDB parsing
    * yet, see the "known asymmetry" note in spec.md. Never presented as real
@@ -16,6 +26,19 @@ export interface StepEvent {
    */
   locals: Record<string, unknown>;
   stack: string[];
+  /**
+   * Per-frame name+locals, innermost-first — same order/index as `stack`,
+   * capped at MAX_FRAMES_WITH_LOCALS frames (see `sandbox/jdi/Debugger.java`).
+   * Lets the call-stack panel show any frame's own locals when clicked
+   * (tasks.md's Python-Tutor-inspired recursion-clarity item), rather than
+   * only ever the innermost frame's.
+   *
+   * JAVA ONLY for now — `undefined` for C#/Ruby traces, which still only
+   * populate `locals`/`stack` above. Callers must fall back to `locals`
+   * when this is missing or a requested index is out of range (see
+   * variables-panel.component.ts).
+   */
+  frames?: FrameInfo[];
   /** Wall-clock time, measured under debugger instrumentation — noisy, not a benchmark. */
   time_ns: number;
   /** Memory usage, measured under debugger instrumentation — noisy, not a benchmark. */

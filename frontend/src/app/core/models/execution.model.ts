@@ -15,6 +15,16 @@ export interface CreateExecutionResponse {
 export interface TraceResponse {
   execution_id: string;
   status: ExecutionStatus;
+  /**
+   * The ACTUAL source that was submitted for this execution — added so a
+   * reload mid-execution (or opening a shared link) can restore the real
+   * code+language into the editor, instead of leaving whatever starter
+   * example happened to be showing next to a reconnected trace it could
+   * never have produced (see ExecutionSessionService.restoredCode /
+   * restoredLanguage, consumed by app.ts).
+   */
+  language: Language;
+  code: string;
   events: ExecutionEvent[];
 }
 

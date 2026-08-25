@@ -43,6 +43,22 @@ public class Debugger {
     // omitted, don't just silently drop data).
     static final int MAX_STACK_FRAMES = 50;
 
+    // Cap on how many of those frames also get a full `locals` snapshot in
+    // the new `frames` array (per-frame click-to-inspect in the call-stack
+    // panel, tasks.md's Python-Tutor-inspired recursion-clarity item).
+    // Deliberately much tighter than MAX_STACK_FRAMES: `stack` only
+    // serializes a frame *name* per frame, cheap even at recursion depth in
+    // the thousands (see MAX_STACK_FRAMES's own doc comment on the
+    // quadratic-growth incident that cap exists to prevent) -- but walking
+    // every frame's `visibleVariables()`/`getValue()` (the same real JDI
+    // remote calls emitStepEvent already makes for the innermost frame) is
+    // far from free, and doing it for EVERY frame of a deep recursive stack
+    // on EVERY step event would reproduce that exact blowup, just worse.
+    // 20 covers what a user could plausibly click through in the call-stack
+    // panel anyway; frames beyond it still show up by name in `stack`, just
+    // without a clickable locals view.
+    static final int MAX_FRAMES_WITH_LOCALS = 20;
+
     // memory_bytes instrumentation toggle (mirrors spike.suspend/
     // spike.skipdata/spike.sample above). Defaults to ON when the property
     // isn't set at all (java.rs doesn't pass it today) -- this flag exists
@@ -481,33 +497,44 @@ public class Debugger {
         }
     }
 
+    /**
+     * Serializes one frame's local variables as a JSON object, same shape as
+     * the top-level `locals` field. Shared by the innermost frame (backward
+     * -compatible `locals`) and every frame in the new `frames` array below
+     * -- one real JDI `visibleVariables()`/`getValue()` walk per frame,
+     * exactly like emitStepEvent already did for frame 0 alone before this.
+     */
+    static String frameLocalsJson(StackFrame frame) {
+        StringBuilder locals = new StringBuilder("{");
+        boolean first = true;
+        try {
+            for (LocalVariable var : frame.visibleVariables()) {
+                Value val = frame.getValue(var);
+                if (!first) locals.append(",");
+                first = false;
+                locals.append('"').append(escapeJson(var.name())).append("\":")
+                        .append(serializeValue(val, MAX_DEPTH, new HashSet<>()));
+            }
+        } catch (AbsentInformationException e) {
+            // sem debug info pra essa frame (ex: código de biblioteca)
+        }
+        locals.append('}');
+        return locals.toString();
+    }
+
     static void emitStepEvent(LocatableEvent event, long t0) {
         try {
             ThreadReference thread = event.thread();
             StackFrame frame = thread.frame(0);
             Location loc = frame.location();
-
-            StringBuilder locals = new StringBuilder("{");
-            boolean first = true;
-            try {
-                for (LocalVariable var : frame.visibleVariables()) {
-                    Value val = frame.getValue(var);
-                    if (!first) locals.append(",");
-                    first = false;
-                    locals.append('"').append(var.name()).append("\":")
-                            .append(serializeValue(val, MAX_DEPTH, new HashSet<>()));
-                }
-            } catch (AbsentInformationException e) {
-                // sem debug info pra essa frame (ex: código de biblioteca)
-            }
-            locals.append('}');
+            String locals = frameLocalsJson(frame);
 
             // Innermost frames first (frames.get(0) is the current frame, same
             // order thread.frames() already returns) -- capped at
             // MAX_STACK_FRAMES so a deeply recursive program doesn't blow up
             // per-event size (see MAX_STACK_FRAMES's doc comment above).
-            StringBuilder stack = new StringBuilder("[");
             List<StackFrame> frames = thread.frames();
+            StringBuilder stack = new StringBuilder("[");
             int frameCount = Math.min(frames.size(), MAX_STACK_FRAMES);
             for (int i = 0; i < frameCount; i++) {
                 if (i > 0) stack.append(',');
@@ -518,6 +545,28 @@ public class Debugger {
             }
             stack.append(']');
 
+            // Per-frame `name`+`locals`, innermost-first (same order/index
+            // as `stack`), so the frontend's call-stack panel can let a user
+            // click frame i and show frames[i].locals instead of only ever
+            // the innermost frame's -- the Python-Tutor-inspired recursion
+            // -clarity feature (tasks.md). Capped at MAX_FRAMES_WITH_LOCALS,
+            // tighter than MAX_STACK_FRAMES -- see that constant's doc
+            // comment for why. Reuses the innermost frame's already
+            // -computed `locals` string for index 0 instead of re-walking it.
+            StringBuilder framesJson = new StringBuilder("[");
+            int framesWithLocalsCount = Math.min(frames.size(), MAX_FRAMES_WITH_LOCALS);
+            for (int i = 0; i < framesWithLocalsCount; i++) {
+                if (i > 0) framesJson.append(',');
+                StackFrame f = frames.get(i);
+                String frameLocals = (i == 0) ? locals : frameLocalsJson(f);
+                framesJson.append("{\"name\":\"")
+                        .append(escapeJson(f.location().method().name()))
+                        .append("\",\"locals\":")
+                        .append(frameLocals)
+                        .append('}');
+            }
+            framesJson.append(']');
+
             // memory_bytes: read via JDI remote method invocation against
             // the TARGET vm's own Runtime.totalMemory()/freeMemory() (see
             // initMemoryProbe/readUsedMemory) -- NOT Runtime.getRuntime()
@@ -527,8 +576,8 @@ public class Debugger {
             Long memBytes = readMem ? readUsedMemory(thread) : null;
             String memJson = memBytes == null ? "null" : String.valueOf(memBytes);
             System.out.println(String.format(
-                    "{\"type\":\"step\",\"line\":%d,\"locals\":%s,\"stack\":%s,\"time_ns\":%d,\"memory_bytes\":%s}",
-                    loc.lineNumber(), locals, stack, System.nanoTime() - t0, memJson));
+                    "{\"type\":\"step\",\"line\":%d,\"locals\":%s,\"stack\":%s,\"frames\":%s,\"time_ns\":%d,\"memory_bytes\":%s}",
+                    loc.lineNumber(), locals, stack, framesJson, System.nanoTime() - t0, memJson));
         } catch (Exception e) {
             System.err.println("{\"type\":\"error\",\"message\":\"" + escapeJson(String.valueOf(e)) + "\"}");
         }

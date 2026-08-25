@@ -206,6 +206,17 @@ export class App {
 
   readonly currentLine = computed(() => this.currentStep()?.line ?? null);
   readonly currentStack = computed(() => this.currentStep()?.stack ?? null);
+  readonly currentFrames = computed(() => this.currentStep()?.frames ?? null);
+
+  /**
+   * Which call-stack frame's locals the Variables panel currently shows —
+   * defaults to 0 (innermost). Read by both CallStackPanelComponent (to
+   * highlight the selected row) and VariablesPanelComponent (to pick which
+   * frame's locals to render). See call-stack-panel.component.ts's class
+   * doc for the full click-to-inspect feature this backs (tasks.md's
+   * Python-Tutor-inspired recursion-clarity item, Java only for now).
+   */
+  readonly selectedFrameIndex = signal<number>(0);
   readonly outputErrorMessage = computed(() => {
     const terminal = this.terminalEvent();
     return terminal?.type === 'error' ? terminal.message : null;
@@ -293,6 +304,36 @@ export class App {
         localStorage.removeItem(LAST_EXECUTION_ID_KEY);
       }
     });
+
+    // Selecting a call-stack frame is meaningful only for the step it was
+    // clicked on — stepping to a different line resets the Variables panel
+    // back to the innermost frame (index 0), same as a real debugger's
+    // "locals" view naturally follows wherever execution currently is,
+    // rather than staying pinned to a frame that may not even exist at the
+    // new step (e.g. selecting an outer frame, then stepping past its
+    // return).
+    effect(() => {
+      this.currentStepIndex();
+      this.selectedFrameIndex.set(0);
+    });
+
+    // UX audit fix: a page reload mid-execution (or opening a shared link)
+    // used to keep showing whatever starter example happened to be in the
+    // editor next to a reconnected trace with real variable values that
+    // code could never have produced — a real trust-breaking bug. The API
+    // now returns the ACTUAL submitted language+code alongside the trace
+    // (see TraceResponse's doc comment); this applies them back into the
+    // editor the moment load() resolves. One-shot per distinct value thanks
+    // to Angular's own signal equality check — run()'s normal "click Run"
+    // path never touches these signals, so this never fires (and never
+    // clobbers in-progress edits) outside an actual load()/reconnect.
+    effect(() => {
+      const restoredLanguage = this.session.restoredLanguage();
+      const restoredCode = this.session.restoredCode();
+      if (restoredLanguage === null || restoredCode === null) return;
+      this.language.set(restoredLanguage);
+      this.code.set(restoredCode);
+    });
   }
 
   onLanguageChange(event: Event): void {
@@ -303,6 +344,15 @@ export class App {
     // anyway (different syntax entirely), so there is no useful "keep the
     // edits" option here.
     this.code.set(STARTER_CODE[language]);
+
+    // UX audit fix: switching languages used to leave the PREVIOUS
+    // language's execution_id/trace/complexity result on screen until the
+    // next Run click made the mismatch obvious (e.g. a Java call stack next
+    // to a Ruby-labeled editor). Reset to a clean "not run yet" state
+    // immediately instead of waiting for that next Run.
+    this.session.reset();
+    this.analysisOutcome.set(null);
+    this.analysisLoading.set(false);
   }
 
   onRun(): void {
@@ -315,6 +365,10 @@ export class App {
 
   onBreakpointToggle(line: number): void {
     this.trace.toggleBreakpoint(line);
+  }
+
+  onFrameSelect(index: number): void {
+    this.selectedFrameIndex.set(index);
   }
 
   stepForward(): void {

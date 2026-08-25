@@ -147,10 +147,19 @@
     <div class="tab-panel">
       @switch (activeTab()) {
         @case ('variables') {
-          <app-variables-panel [language]="language()" [currentStep]="currentStep()" />
+          <app-variables-panel
+            [language]="language()"
+            [currentStep]="currentStep()"
+            [selectedFrameIndex]="selectedFrameIndex()"
+          />
         }
         @case ('callstack') {
-          <app-call-stack-panel [stack]="currentStack()" />
+          <app-call-stack-panel
+            [stack]="currentStack()"
+            [frames]="currentFrames()"
+            [selectedFrameIndex]="selectedFrameIndex()"
+            (frameSelect)="onFrameSelect($event)"
+          />
         }
         @case ('output') {
           <app-output-panel [output]="outputSoFar()" [errorMessage]="outputErrorMessage()" />

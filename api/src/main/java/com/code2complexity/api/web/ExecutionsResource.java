@@ -81,7 +81,8 @@ public class ExecutionsResource {
     public Response trace(@PathParam("id") String id) {
         return store.find(id)
                 .<Response>map(execution -> Response.ok(new TraceResponse(
-                        execution.getId(), execution.getStatus().jsonValue(), execution.getEvents())).build())
+                        execution.getId(), execution.getStatus().jsonValue(), execution.getLanguage(),
+                        execution.getCode(), execution.getEvents())).build())
                 .orElseGet(() -> Response.status(404).entity(new ErrorResponse("execution not found")).build());
     }
 }

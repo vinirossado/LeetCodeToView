@@ -37,6 +37,13 @@ export class ExecutionSessionService {
 
   private readonly executionIdSig = signal<string | null>(null);
   private readonly runErrorSig = signal<string | null>(null);
+  // Set only by load() (reload-mid-execution reconnect / shared-link open),
+  // never by run() — a fresh Run already has the right code+language on
+  // screen, there's nothing to restore. See TraceResponse's doc comment for
+  // why the API started returning these, and app.ts for where these get
+  // applied back into the editor.
+  private readonly restoredLanguageSig = signal<Language | null>(null);
+  private readonly restoredCodeSig = signal<string | null>(null);
   // Deliberately a dedicated signal, NOT derived from `traceStore.status()`.
   // TraceStoreService defaults (and resets) to 'pending' — a value it also
   // uses mid-run for "execution created, not running yet". Deriving isBusy
@@ -54,6 +61,23 @@ export class ExecutionSessionService {
   readonly executionId = this.executionIdSig.asReadonly();
   readonly runError = this.runErrorSig.asReadonly();
   readonly isBusy = this.busySig.asReadonly();
+  readonly restoredLanguage = this.restoredLanguageSig.asReadonly();
+  readonly restoredCode = this.restoredCodeSig.asReadonly();
+
+  /**
+   * Resets to a clean "not run yet" state without starting any new
+   * request — used when the language selector changes (see app.ts's
+   * onLanguageChange) so the PREVIOUS language's execution id/trace/error
+   * doesn't linger on screen until the next Run click makes it obvious
+   * something is stale.
+   */
+  reset(): void {
+    this.wsSubscription?.unsubscribe();
+    this.traceStore.reset();
+    this.runErrorSig.set(null);
+    this.executionIdSig.set(null);
+    this.busySig.set(false);
+  }
 
   run(language: Language, code: string): void {
     this.wsSubscription?.unsubscribe();
@@ -87,6 +111,13 @@ export class ExecutionSessionService {
       next: (trace) => {
         this.traceStore.loadTrace(trace.events);
         this.traceStore.setStatus(trace.status);
+        // Restore the ACTUAL submitted code+language (see TraceResponse's
+        // doc comment) — before this, a reload mid-execution kept showing
+        // whatever starter example happened to be in the editor next to a
+        // reconnected trace with real variable values that code could
+        // never have produced. app.ts applies these back into the editor.
+        this.restoredLanguageSig.set(trace.language);
+        this.restoredCodeSig.set(trace.code);
         if (trace.status === 'pending' || trace.status === 'running') {
           this.streamLive(executionId, trace.events.length);
         } else {

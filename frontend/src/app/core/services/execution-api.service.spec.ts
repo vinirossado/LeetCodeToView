@@ -38,8 +38,14 @@ describe('ExecutionApiService', () => {
 
     const req = httpMock.expectOne(`${environment.apiBaseUrl}/executions/abc-123/trace`);
     expect(req.request.method).toBe('GET');
-    req.flush({ execution_id: 'abc-123', status: 'completed', events: [] });
+    req.flush({ execution_id: 'abc-123', status: 'completed', language: 'java', code: 'int x = 1;', events: [] });
 
-    expect(result).toEqual({ execution_id: 'abc-123', status: 'completed', events: [] });
+    expect(result).toEqual({
+      execution_id: 'abc-123',
+      status: 'completed',
+      language: 'java',
+      code: 'int x = 1;',
+      events: [],
+    });
   });
 });

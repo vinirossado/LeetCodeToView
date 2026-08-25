@@ -8,11 +8,12 @@ function step(locals: Record<string, unknown>): StepEvent {
 }
 
 describe('VariablesPanelComponent', () => {
-  function create(language: 'java' | 'csharp', currentStep: StepEvent | null) {
+  function create(language: 'java' | 'csharp', currentStep: StepEvent | null, selectedFrameIndex = 0) {
     TestBed.configureTestingModule({ imports: [VariablesPanelComponent] });
     const fixture = TestBed.createComponent(VariablesPanelComponent);
     fixture.componentRef.setInput('language', language);
     fixture.componentRef.setInput('currentStep', currentStep);
+    fixture.componentRef.setInput('selectedFrameIndex', selectedFrameIndex);
     fixture.detectChanges();
     return fixture;
   }
@@ -53,5 +54,56 @@ describe('VariablesPanelComponent', () => {
     expect(text).toContain('counter');
     expect(text).toContain('message');
     expect(text.toLowerCase()).not.toMatch(/não são os nomes reais|posições/);
+  });
+
+  describe('per-frame selection (recursion clarity — Python Tutor-inspired, Java only for now)', () => {
+    function stepWithFrames(): StepEvent {
+      return {
+        type: 'step',
+        line: 3,
+        locals: { n: 1 }, // innermost frame's locals, frames[0] mirrors this
+        stack: ['factorial', 'factorial', 'main'],
+        frames: [
+          { name: 'factorial', locals: { n: 1 } },
+          { name: 'factorial', locals: { n: 2 } },
+          { name: 'main', locals: { result: 0 } },
+        ],
+        time_ns: 1,
+        memory_bytes: 1,
+      };
+    }
+
+    it('shows the innermost frame\'s locals by default (selectedFrameIndex 0)', () => {
+      const fixture = create('java', stepWithFrames());
+      const text = fixture.nativeElement.textContent;
+      expect(text).toContain('n');
+      expect(text).toContain('1');
+      expect(text).not.toContain('result');
+    });
+
+    it('shows the SELECTED frame\'s locals, not the innermost one, when selectedFrameIndex points elsewhere', () => {
+      const fixture = create('java', stepWithFrames(), 1);
+      const text = fixture.nativeElement.textContent;
+      expect(text).toContain('n');
+      expect(text).toContain('2'); // the outer factorial(2) frame's own n, distinct from the innermost's n=1
+      expect(text).not.toContain('result');
+    });
+
+    it('shows the outermost frame (main) and its own distinct locals when selected', () => {
+      const fixture = create('java', stepWithFrames(), 2);
+      const keys = [...fixture.nativeElement.querySelectorAll('dt')].map((el: Element) => el.textContent);
+      expect(keys).toEqual(['result']);
+    });
+
+    it('labels which frame is being viewed once a non-innermost frame is selected', () => {
+      const fixture = create('java', stepWithFrames(), 1);
+      expect(fixture.nativeElement.textContent).toContain('factorial');
+    });
+
+    it('falls back to the step\'s own `locals` when `frames` is absent (C#/Ruby) even if selectedFrameIndex is non-zero', () => {
+      const noFrames = step({ local_0: 'x' });
+      const fixture = create('csharp', noFrames, 2);
+      expect(fixture.nativeElement.textContent).toContain('local_0');
+    });
   });
 });

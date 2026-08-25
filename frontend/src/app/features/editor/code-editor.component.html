@@ -1,1 +1,23 @@
 <div class="editor-host" #host></div>
+<button
+  type="button"
+  class="tab-focus-toggle"
+  (click)="toggleTabFocusMode()"
+  [attr.aria-pressed]="tabFocusMode()"
+  [title]="
+    tabFocusMode()
+      ? 'Tab move o foco para fora do editor (padrão de acessibilidade). Clique ou pressione ' +
+        tabFocusShortcutLabel +
+        ' para usar Tab como indentação de código.'
+      : 'Tab insere indentação no código. Clique ou pressione ' +
+        tabFocusShortcutLabel +
+        ' para que Tab mova o foco para fora do editor.'
+  "
+>
+  @if (tabFocusMode()) {
+    <span>⇥ Tab move o foco</span>
+  } @else {
+    <span>⇥ Tab indenta código</span>
+  }
+  <kbd>{{ tabFocusShortcutLabel }}</kbd>
+</button>

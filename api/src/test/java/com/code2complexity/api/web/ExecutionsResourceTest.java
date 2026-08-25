@@ -276,6 +276,8 @@ class ExecutionsResourceTest {
                     .statusCode(200)
                     .body("execution_id", equalTo(execution.getId()))
                     .body("status", equalTo("completed"))
+                    .body("language", equalTo("java"))
+                    .body("code", equalTo("int x = 1;"))
                     .body("events.size()", is(1))
                     .body("events[0].line", equalTo(1));
         }

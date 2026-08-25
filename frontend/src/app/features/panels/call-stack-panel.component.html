@@ -1,12 +1,33 @@
 <section class="panel">
   <h3>Call stack</h3>
-  @if (frames().length === 0) {
+  @if (names().length === 0) {
     <p class="empty">nenhuma execução em andamento</p>
   } @else {
     <ol>
-      @for (frame of frames(); track $index) {
-        <li>{{ frame }}</li>
+      @for (name of names(); track $index) {
+        <li>
+          @if (hasFrameData()) {
+            <button
+              type="button"
+              class="frame-btn"
+              [class.selected]="$index === selectedFrameIndex()"
+              [attr.aria-pressed]="$index === selectedFrameIndex()"
+              (click)="onSelect($index)"
+              title="Ver variáveis locais deste frame"
+            >
+              {{ name }}
+            </button>
+          } @else {
+            <span class="frame-static">{{ name }}</span>
+          }
+        </li>
       }
     </ol>
+    @if (!hasFrameData()) {
+      <p class="frame-data-note">
+        Inspeção de variáveis por frame disponível só para Java por enquanto — clique nos frames não
+        funciona ainda para esta linguagem.
+      </p>
+    }
   }
 </section>

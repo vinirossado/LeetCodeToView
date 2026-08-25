@@ -21,6 +21,23 @@ const editorInstance = {
   getModel: vi.fn(() => ({ getLineCount: () => 10 })),
 };
 
+// Mirrors the real global Monaco singleton (browser/config/tabFocus.js) —
+// see code-editor.component.ts's TabFocus import doc comment for why this
+// is imported/mocked directly rather than via editor.trigger()/getAction():
+// a real running instance of this exact production build showed the
+// documented editor.action.toggleTabFocusMode command/keybinding path
+// silently does nothing (confirmed via e2e/tests/keyboard-accessibility.spec.ts),
+// so the component now reads/writes this singleton directly instead.
+let fakeTabFocusMode = false;
+vi.mock('monaco-editor/esm/vs/editor/browser/config/tabFocus.js', () => ({
+  TabFocus: {
+    getTabFocusMode: () => fakeTabFocusMode,
+    setTabFocusMode: (v: boolean) => {
+      fakeTabFocusMode = v;
+    },
+  },
+}));
+
 vi.mock('monaco-editor', () => {
   class FakeRange {
     constructor(
@@ -47,6 +64,8 @@ describe('CodeEditorComponent', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     modelValue = '';
+    fakeTabFocusMode = false; // Monaco's own real default before this app applies its own
+    localStorage.clear();
     TestBed.configureTestingModule({ imports: [CodeEditorComponent] });
   });
 
@@ -120,5 +139,35 @@ describe('CodeEditorComponent', () => {
     fixture.componentRef.setInput('value', 'int x = 1;'); // same as the initial value from create()
     fixture.detectChanges();
     expect(editorInstance.setValue).not.toHaveBeenCalled();
+  });
+
+  describe('tabFocusMode (WCAG 2.1.2 keyboard-trap fix)', () => {
+    it('defaults tabFocusMode to true on first visit (no persisted preference) — Tab moves focus out of the editor, not Monaco\'s own trapping default', () => {
+      const fixture = create();
+      expect(fakeTabFocusMode).toBe(true);
+      expect(fixture.componentInstance.tabFocusMode()).toBe(true);
+    });
+
+    it('respects a persisted "false" preference (user explicitly chose Tab-for-indent)', () => {
+      localStorage.setItem('code2complexity.tabFocusMode', 'false');
+      const fixture = create();
+      expect(fakeTabFocusMode).toBe(false);
+      expect(fixture.componentInstance.tabFocusMode()).toBe(false);
+    });
+
+    it('toggleTabFocusMode() flips the mode and persists the new choice', () => {
+      const fixture = create();
+      expect(fixture.componentInstance.tabFocusMode()).toBe(true);
+
+      fixture.componentInstance.toggleTabFocusMode();
+
+      expect(fixture.componentInstance.tabFocusMode()).toBe(false);
+      expect(localStorage.getItem('code2complexity.tabFocusMode')).toBe('false');
+
+      fixture.componentInstance.toggleTabFocusMode();
+
+      expect(fixture.componentInstance.tabFocusMode()).toBe(true);
+      expect(localStorage.getItem('code2complexity.tabFocusMode')).toBe('true');
+    });
   });
 });

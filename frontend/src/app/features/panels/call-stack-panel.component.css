@@ -27,6 +27,11 @@ ol {
 }
 
 li {
+  padding: 0;
+}
+
+.frame-static {
+  display: block;
   padding: var(--c2c-space-1) var(--c2c-space-2);
   background: var(--c2c-bg-inset);
   border: 1px solid var(--c2c-border-subtle);
@@ -34,7 +39,43 @@ li {
   color: var(--c2c-text);
 }
 
-li:first-child {
+li:first-child .frame-static {
   border-color: var(--c2c-accent);
   color: var(--c2c-accent);
+}
+
+.frame-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--c2c-space-1) var(--c2c-space-2);
+  background: var(--c2c-bg-inset);
+  border: 1px solid var(--c2c-border-subtle);
+  border-radius: var(--c2c-radius-sm);
+  color: var(--c2c-text);
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.frame-btn:hover {
+  border-color: var(--c2c-accent);
+}
+
+.frame-btn.selected {
+  border-color: var(--c2c-accent);
+  color: var(--c2c-accent);
+  background: var(--c2c-bg-inset);
+  font-weight: 600;
+}
+
+.frame-btn:focus-visible {
+  outline: 2px solid var(--c2c-accent);
+  outline-offset: 1px;
+}
+
+.frame-data-note {
+  margin-top: var(--c2c-space-2);
+  color: var(--c2c-text-muted);
+  font-size: 0.75rem;
 }

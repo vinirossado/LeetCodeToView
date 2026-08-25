@@ -1,10 +1,56 @@
 :host {
-  display: block;
+  display: flex;
+  flex-direction: column;
   height: 100%;
 }
 
 .editor-host {
   width: 100%;
-  height: 100%;
-  min-height: 320px;
+  flex: 1 1 auto;
+  min-height: 280px;
+}
+
+/*
+ * Persistent, always-visible indicator of Monaco's "Tab Moves Focus" mode
+ * (WCAG 2.1.2 fix — see code-editor.component.ts's TAB_FOCUS_MODE_KEY doc
+ * comment). Deliberately NOT a tooltip-only affordance: a first-time
+ * keyboard-only user needs to be able to find this without already hovering
+ * it, so the current mode + shortcut are always on-screen as plain text.
+ */
+.tab-focus-toggle {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.3rem 0.6rem;
+  border: none;
+  border-top: 1px solid var(--border-color, #333);
+  background: var(--panel-bg, #1e1e1e);
+  color: var(--text-secondary, #ccc);
+  font-size: 0.78rem;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tab-focus-toggle:hover,
+.tab-focus-toggle:focus-visible {
+  background: var(--panel-bg-hover, #2a2a2a);
+  color: var(--text-primary, #fff);
+}
+
+.tab-focus-toggle:focus-visible {
+  outline: 2px solid #4a9eff;
+  outline-offset: -2px;
+}
+
+.tab-focus-toggle kbd {
+  font-family: inherit;
+  font-size: 0.72rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  border: 1px solid var(--border-color, #444);
+  background: rgba(255, 255, 255, 0.06);
 }
