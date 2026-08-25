@@ -4,45 +4,92 @@
 # (deploy.sh does exactly this, sourcing env vars from an untracked .env
 # on the VPS first — see .ci/readme.md).
 #
-# ── OPEN QUESTION, UNRESOLVED — nsjail's privilege requirement in Swarm ──
-# docker-compose.yml (local dev) uses `privileged: true` + `cgroup: host`
-# on this service so nsjail can create namespaces/cgroups (see that file's
-# own comment, and tasks.md's Fase 0.5 finding: nsjail needs the HOST's
-# root cgroupv2 hierarchy, confirmed empirically). Neither field exists in
-# Swarm-mode stack files:
-#   - `privileged: true` is silently ignored by `docker stack deploy`
-#     ("Ignoring unsupported options: privileged") — confirmed via search,
-#     this is a long-standing, deliberate Swarm limitation, not a bug.
-#   - `cgroup: host` (Compose's `--cgroupns=host` equivalent) has no
-#     documented Swarm-mode counterpart at all.
-#   - `cap_add`/`cap_drop` (below) ARE supported by `docker stack deploy`
-#     since Docker CE 20.10, but adding specific capabilities is NOT the
-#     same as `--privileged` (which also disables seccomp/AppArmor
-#     confinement and grants device access). tasks.md's own Fase 0.5 spike
-#     already tried a fairly broad capability set by hand
-#     (`cap_sys_admin,cap_sys_chroot,cap_net_admin,cap_sys_resource,
-#     cap_setuid,cap_setgid` via setcap) and found it INSUFFICIENT — nsjail
-#     failed at `setgroups` inside the user namespace it creates. `cap_add`
-#     below is included as a best-effort partial mitigation, NOT a verified
-#     fix — do not treat it as closing this gap.
+# ── VALIDATED AGAINST A REAL SWARM CLUSTER — cgroup piece solved, one
+# genuine structural gap remains (systempaths/seccomp) ──
+# docker-compose.yml (local dev) uses `cap_drop: [ALL]` + 7 capabilities +
+# `security_opt: [systempaths=unconfined, seccomp=unconfined]` + an
+# explicit `/sys/fs/cgroup:rw` bind mount (see that file's own comment for
+# the full Compose-side investigation). This file used to just mirror the
+# `cap_add` list and flag the rest as unvalidated guesswork. This section
+# replaces that with real findings from a real `docker swarm init` +
+# `docker stack deploy` cluster (single-node, local, disposable — cap_drop
+# below is unchanged from what shipped before, `volumes` is new, both
+# validated by real `POST /executions` runs, not inferred from docs):
 #
-# Real options identified, none implemented/verified here (see tasks.md):
-#   (a) Run the Sandbox Controller as a plain `docker run --privileged
-#       --cgroupns=host` container OUTSIDE Swarm's service model entirely
-#       (e.g. a systemd unit on the VPS host), with the API talking to it
-#       over the network instead of subprocess — but this needs the real
-#       API/Sandbox-Controller IPC contract that doesn't exist yet either
-#       (see .ci/Dockerfile's header comment and tasks.md).
-#   (b) A docker-socket-bind-mount "privileged proxy" pattern some Swarm
-#       users use to launch privileged siblings from an unprivileged Swarm
-#       service — adds a docker.sock exposure (root-equivalent host access)
-#       to work around a different privilege gap, arguably worse.
-#   (c) Move to Firecracker microVMs (already on the roadmap, spec.md
-#       "Evolução: Firecracker/microVM") — sidesteps needing nsjail's
-#       elevated container privileges entirely, since isolation would no
-#       longer depend on this container's own namespace/cgroup access.
-# None of these were built or tested in this task — flagged here and in
-# tasks.md as a real, open gap rather than papered over with cap_add.
+#   1. `cap_add` (below, 7 caps incl. `DAC_OVERRIDE`) — CONFIRMED supported
+#      by `docker stack deploy` (Docker CE 20.10+, as already noted before)
+#      and, combined with the volumes bind mount below, sufficient — same
+#      set as docker-compose.yml's validated config.
+#   2. `cgroup: host` (Compose's `--cgroupns=host` equivalent) — tested
+#      directly in a stack file: REJECTED outright by `docker stack deploy`
+#      at schema-validation time ("services.api Additional property cgroup
+#      is not allowed"), not silently ignored. No Swarm-mode stack-file
+#      field, `docker service create` CLI flag, or Swarm Engine-API
+#      ContainerSpec field provides an equivalent (confirmed by inspecting
+#      a running service's `Spec.TaskTemplate.ContainerSpec.Privileges` via
+#      the raw Engine API — it only has `CredentialSpec`/`SELinuxContext`/
+#      `NoNewPrivileges`, no seccomp/cgroupns/AppArmor field at all).
+#   3. **The explicit `/sys/fs/cgroup:/sys/fs/cgroup:rw` bind mount below —
+#      genuinely surprising finding**: added ALONE, with no `cgroup: host`
+#      equivalent (the task's container still runs with
+#      `HostConfig.CgroupnsMode: private`, confirmed via `docker inspect`),
+#      it fully fixes nsjail's cgroupv2 delegation error ("Could not apply
+#      '+memory' to cgroup.subtree_control ... nsjail MUST be run from root
+#      and the cgroup mount path must refer to the root/host cgroup") —
+#      confirmed via `docker service logs` showing that exact error before
+#      the mount was added, and a DIFFERENT error (see #4) after, never
+#      that one again. Not fully understood WHY a private cgroup namespace
+#      is sufficient here when it isn't under plain `docker run`/Compose,
+#      but real and reproducible on this test cluster (Docker Desktop,
+#      cgroup v2). Flagged as validated HERE, not yet cross-checked against
+#      a real Linux VPS Swarm node — if the VPS ever fails at the same
+#      cgroup step despite this mount, re-open this specific sub-finding.
+#   4. `security_opt: [systempaths=unconfined, seccomp=unconfined]` —
+#      **confirmed impossible under `docker stack deploy` at every layer
+#      checked, not just "not yet validated"**:
+#        - In the stack YAML: `docker stack deploy` accepts the file but
+#          prints "Ignoring unsupported options: security_opt" and applies
+#          nothing — confirmed by redeploying with ONLY this field added
+#          and observing zero new task rollout (Swarm didn't even consider
+#          the spec changed) plus a real `POST /executions` still failing
+#          with the exact same nsjail error as before the field was added.
+#        - `docker service create --help` has no `--security-opt`/
+#          `--seccomp`/`--no-new-privileges`/`--privileged` flag at all —
+#          not a stack-file-specific gap, the whole Swarm CLI surface lacks
+#          it.
+#        - The raw Engine API's Swarm `ContainerSpec.Privileges` struct
+#          (inspected directly via `/v1.51/services/<id>`) has no
+#          Seccomp/AppArmor field — Compose's non-Swarm `docker run`/
+#          `docker-compose` path goes through a DIFFERENT container-creation
+#          API that does have one; Swarm tasks are created through a path
+#          that structurally does not carry this option AT ALL. This is not
+#          a missing CLI convenience, it's an absent field in the Swarm task
+#          data model.
+#      Real, validated consequence of the gap: nsjail's own nested
+#      `mount --bind` of a fresh procfs inside the jail fails EPERM
+#      ("procfs mount may fail if /proc has overmounts" -> "Failed to
+#      mount mandatory point: '/proc'" -> "Failed to build mount tree"),
+#      reproduced identically for all three languages (Java, C#, Ruby —
+#      confirmed via `docker service logs`, same generic nsjail
+#      mount-tree-building failure for all three, since it happens before
+#      any language-specific work starts) — meaning **every**
+#      `POST /executions` fails under `docker stack deploy` today,
+#      regardless of language, with cap_add + the cgroup mount above in
+#      place but no `security_opt` equivalent. Did not attempt the one
+#      remaining real lever (a node-wide dockerd default seccomp-profile/
+#      no-new-privileges override in `daemon.json`) — that changes
+#      confinement for EVERY container on the node, not just this service,
+#      a materially worse blast radius than Compose's per-service opt-in,
+#      and requires a Docker daemon restart; left as the concrete next step
+#      in tasks.md rather than done here.
+#
+# Net effect: this file is now AS FAR as `docker stack deploy` can be
+# pushed toward docker-compose.yml's validated minimal-privilege posture
+# from the stack file alone. The cgroup piece (#2/#3) is fully solved. The
+# systempaths/seccomp piece (#4) is a genuine, structural Swarm limitation,
+# not a guess or an oversight — see tasks.md for the concrete remaining
+# options (daemon-wide profile change, or the architecture options (a)/(b)/
+# (c) this file used to list, still real, still not implemented).
 services:
   api:
     image: pizito:5001/leetcodeview:latest
@@ -53,6 +100,13 @@ services:
       - SYS_RESOURCE
       - SETUID
       - SETGID
+      - DAC_OVERRIDE
+    volumes:
+      # See finding #3 above: validated necessary AND (surprisingly)
+      # sufficient for nsjail's cgroupv2 delegation, even without a
+      # `cgroup: host` equivalent (which Swarm has no way to express at
+      # all — see #2).
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
     environment:
       # Second-line-of-defense .NET heap cap (see spec.md "Hardening de
       # memória") — same value as docker-compose.yml. Not a secret, kept
@@ -69,11 +123,11 @@ services:
       start_period: 60s
     deploy:
       # 1 replica, deliberately: this service holds elevated host
-      # privileges (cap_add above, and whatever eventually replaces the
-      # privileged/cgroup-host gap noted above) to run nsjail against
-      # arbitrary user-submitted code. Multiplying replicas multiplies the
-      # blast radius of that privilege surface across the Swarm cluster —
-      # scale only after the privileged-mode gap above has a real answer.
+      # privileges (cap_add above) to run nsjail against arbitrary
+      # user-submitted code. Multiplying replicas multiplies the blast
+      # radius of that privilege surface across the Swarm cluster — scale
+      # only after the systempaths/seccomp gap above has a real answer AND
+      # executions actually succeed end-to-end under Swarm.
       replicas: 1
       update_config:
         order: start-first

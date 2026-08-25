@@ -173,6 +173,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # --user/--group) is what actually achieves non-root sandboxed
     # execution, and why this package is required for that.
     uidmap \
+    # ruby: was missing here entirely until this was found empirically —
+    # `bash /tmp/build-minimal-rootfs.sh` (below) failed outright with
+    # "ruby: command not found" (it shells out to `ruby -e 'puts
+    # RbConfig::CONFIG[...]'` to derive the Ruby rootfs's paths, and copies
+    # the `/usr/bin/ruby` binary itself into that rootfs). Dockerfile.api
+    # never hit this because its runtime stage IS the toolchain stage (`FROM
+    # toolchain`), which already installs `ruby` for a different reason (see
+    # that file's own comment); this file's runtime stage is a fresh
+    # `debian:bookworm-slim` and needs its own install, same as JDK/dotnet
+    # above already get their own separate installs here.
+    ruby \
     && rm -rf /var/lib/apt/lists/*
 
 # See Dockerfile.api's identical comment: newuidmap/newgidmap require this
@@ -224,6 +235,15 @@ COPY --from=sandbox-build /build/sandbox/target/release/sandbox-runner /app/sand
 # validation to pass).
 COPY --from=sandbox-build /app/jdi-driver.jar /app/jdi-driver.jar
 COPY --from=sandbox-build /app/jdi-driver.jsa /app/jdi-driver.jsa
+# ruby-driver.rb: also missing here until found empirically alongside the
+# `ruby` package gap above — see Dockerfile.api's identical COPY comment.
+# build-minimal-rootfs.sh copies THIS file (/app/ruby-driver.rb) into the
+# Ruby rootfs below; without it that cp is a silent no-op source-missing
+# skip today (it's not `set -e`-guarded against a missing source arg the
+# same way as a failed mkdir), and ruby.rs's hardcoded RUBY_DRIVER_PATH
+# would then 404/ENOENT at actual sandboxed-execution time instead of at
+# build time.
+COPY --from=sandbox-build /build/sandbox/ruby/driver.rb /app/ruby-driver.rb
 COPY --from=analyzer-build /build/static-analyzer/target/release/static-analyzer /app/static-analyzer
 COPY --from=api-build /build/api/target/quarkus-app /app/quarkus-app
 
