@@ -16,8 +16,12 @@ describe('CallStackPanelComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('nenhuma');
   });
 
-  it('lists stack frames with the top of the stack first', () => {
-    const fixture = create(['main', 'helper', 'deepest']);
+  it('lists stack frames with the currently executing (innermost) frame first, matching the backend order verbatim', () => {
+    // Backend contract (see the component's own doc comment): every
+    // driver — Debugger.java, com.rs, driver.rb — sends `stack`
+    // innermost-first (index 0 = currently executing frame), so the panel
+    // must render it as-is, not reversed.
+    const fixture = create(['deepest', 'helper', 'main']);
     const items = fixture.nativeElement.querySelectorAll('li');
     expect(items.length).toBe(3);
     expect(items[0].textContent).toContain('deepest');

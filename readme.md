@@ -13,6 +13,10 @@ Uma plataforma web onde você escreve código e vê, em tempo real:
 
 Na prática: um IDE + debugger + profiler + analisador de Big-O, tudo junto, rodando em tempo real.
 
+![Execução passo a passo com breakpoints e variáveis locais em tempo real](.github/assets/1.png)
+
+![Análise estática de complexidade (Big-O) para o mesmo código](.github/assets/2.png)
+
 ## Como funciona
 
 ```
@@ -48,7 +52,7 @@ Código de usuário é tratado como não confiável. Toda execução roda isolad
 
 ## Linguagens
 
-Java e C# juntos no MVP inicial, depois Ruby. A arquitetura não é presa a uma linguagem específica — dá pra adicionar outras depois.
+Java, C# e Ruby, hoje. A arquitetura não é presa a uma linguagem específica — dá pra adicionar outras depois.
 
 ---
 

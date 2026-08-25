@@ -26,6 +26,22 @@ services:
     cgroup: host
     environment:
       - DOTNET_GCHeapHardLimit=0x8000000
+      # Rate-limit headroom for local dev / the E2E suite ONLY — does NOT
+      # touch the real production default (api/src/main/resources/
+      # application.properties' rate-limit.executions.max-requests=10,
+      # which is what .ci/stack.yml's Swarm deploy actually ships, since
+      # that file has its own separate `environment:` block and does not
+      # inherit from this one — confirmed by reading it, not assumed).
+      # Real, reproducible finding: e2e/'s full suite makes 11 POST
+      # /executions calls across ~20-45s (grep-counted, not estimated),
+      # 1 more than prod's 10-per-60s budget — it was already sitting
+      # exactly AT that budget with 10 before this override was added, so
+      # any future test genuinely doing one more execution call would trip
+      # it again without headroom. MP Config env-var mapping: dots/hyphens
+      # -> underscores, uppercased (rate-limit.executions.max-requests ->
+      # RATE_LIMIT_EXECUTIONS_MAX_REQUESTS) — standard Quarkus/SmallRye
+      # convention, not a custom mechanism.
+      - RATE_LIMIT_EXECUTIONS_MAX_REQUESTS=50
 
   frontend:
     build:
