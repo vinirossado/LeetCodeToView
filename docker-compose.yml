@@ -90,8 +90,8 @@ services:
       # Rate-limit headroom for local dev / the E2E suite ONLY — does NOT
       # touch the real production default (api/src/main/resources/
       # application.properties' rate-limit.executions.max-requests=10,
-      # which is what .ci/stack.yml's Swarm deploy actually ships, since
-      # that file has its own separate `environment:` block and does not
+      # which is what .ci/leetcodeview-api.service actually ships, since
+      # that file has its own separate environment and does not
       # inherit from this one — confirmed by reading it, not assumed).
       # Real, reproducible finding: e2e/'s full suite makes 11 POST
       # /executions calls across ~20-45s (grep-counted, not estimated),
