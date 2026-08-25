@@ -124,6 +124,88 @@ COPY sandbox/ .
 RUN cargo build --release
 RUN javac -encoding UTF-8 -d /build/jdi-out jdi/Debugger.java
 
+# ─── CDS (Class Data Sharing) archive for the JDI driver ──────────────────
+# Reduces per-execution Java cold start (tasks.md "Pool de JVMs pré-
+# aquecidas ... ou CDS"). The earlier "Cold start medido com precisão"
+# measurement found the ~470ms/execution cost is NOT raw JVM boot (~18ms
+# for `java` alone in this same container) but JDWP-handshake-adjacent
+# work — confirmed by directly instrumenting class loading
+# (-Xlog:class+load=info): of the ~1550 classes a full driver+target run
+# touches, ~520 are NOT covered by the JDK's own default/base CDS archive
+# (already active automatically, "mixed mode, sharing" — that's what makes
+# `newfstat` on lib/server/classes.jsa a REQUIRED syscall in java.rs's
+# JAVA_SECCOMP_POLICY, found independently while hardening seccomp). Of
+# those ~520, ~310 are the jdk.jdi module (com.sun.jdi.*/com.sun.tools.jdi.*
+# — the DRIVER, jdi/Debugger.java, imports this directly) plus ~170 extra
+# java.base classes the debug/subprocess-launch path touches — and
+# essentially ALL of that gap lives in the DRIVER process specifically: a
+# plain debuggee run, even WITH a real JDWP agent attached
+# (-agentlib:jdwp), loads only 3-4 classes outside the base archive. See
+# java.rs's DRIVER_CDS_JAR/DRIVER_CDS_ARCHIVE comment for why the TARGET jvm
+# (LaunchingConnector's child process, running the user's own code)
+# deliberately does NOT get an archive of its own — its classpath is a
+# different, user-supplied directory on every single execution, which both
+# can't be archived (see below) and wouldn't be worth archiving anyway
+# given the above.
+#
+# Mechanism: JDK 25 confirmed (via `java -XX:+PrintFlagsFinal -version |
+# grep -i shar` inside the real temurin-25-jdk image, not guessed) to
+# support "dynamic CDS archiving" (-XX:ArchiveClassesAtExit, stable since
+# JDK 19) — the documented "run your app once, get an archive" successor to
+# the older manual -Xshare:dump + classlist workflow, used here instead of
+# that older mechanism as the least-fragile option available. `java
+# -Xshare:help` (mentioned as one way to probe this) is NOT a real flag on
+# this JDK — confirmed empirically ("Unrecognized option"); PrintFlagsFinal
+# is what actually enumerates the CDS-related flags.
+#
+# Requires a JAR on the classpath, NOT an exploded class directory —
+# confirmed empirically: pointing -XX:ArchiveClassesAtExit at a directory
+# classpath entry fails the dump outright with "Error: non-empty directory
+# in paths / Cannot have non-empty directory in paths" (a real JDK
+# limitation, tracked upstream as JDK-8304484 — the message is confusing
+# but the restriction is real and not a misconfiguration on this project's
+# side). That's why Debugger.class gets jar'd up into jdi-driver.jar here
+# instead of staying the exploded jdi-out/ directory java.rs used to
+# reference directly.
+#
+# The archive's app-classpath entry is matched by EXACT path string at
+# runtime (confirmed empirically: a same-content jar at a different path
+# fails "Archived app classpath validation", logged via -Xlog:class+path=
+# info) — so the jar is built AND the archive is generated at the SAME
+# absolute path ("/app/...") this image's final runtime stage copies it to
+# below, not a /build/... path, otherwise the archive would never validate
+# and CDS would silently do nothing (see -Xshare:auto in java.rs).
+#
+# Trained against test-snippets/Trivial.java — the exact snippet the
+# original cold-start baseline was measured with — run through the REAL
+# Debugger driver end-to-end (spawns an actual target JVM via
+# LaunchingConnector, same as production), so the archive captures the
+# real class set an actual execution touches, not a guess.
+#
+# This RUN is a layer AFTER the `javac ... Debugger.java` layer above (not
+# moved earlier in the Dockerfile), so normal Docker layer caching (no
+# --no-cache needed) already invalidates and regenerates this archive
+# whenever Debugger.java's compiled output changes — it depends on
+# /build/jdi-out's content via the `jar cf ... -C /build/jdi-out .` below,
+# same as any other layer that COPYs/reads a previous layer's output.
+#
+# `test -s`: fail the BUILD loudly if the archive didn't come out non-empty
+# (rather than silently shipping an image java.rs would then reference a
+# missing/empty file for) — matches this project's "never assume, validate
+# empirically" discipline. Safe to be this strict here specifically because
+# java.rs ships with -Xshare:auto (not `on`): even if this whole RUN were
+# somehow skipped or its output corrupted post-build, runtime falls back to
+# the JDK's own always-present default archive rather than crashing — see
+# java.rs's comment on that flag choice.
+RUN mkdir -p /app /build/cds-train && \
+    jar cf /app/jdi-driver.jar -C /build/jdi-out . && \
+    cp test-snippets/Trivial.java /build/cds-train/ && \
+    javac -encoding UTF-8 -g -d /build/cds-train /build/cds-train/Trivial.java && \
+    java -Xlog:cds -XX:ArchiveClassesAtExit=/app/jdi-driver.jsa \
+        -cp /app/jdi-driver.jar Debugger Trivial \
+        "-cp /build/cds-train -Xmx256m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=256m" && \
+    test -s /app/jdi-driver.jsa
+
 # ─── Build static-analyzer ────────────────────────────────────────────────
 FROM toolchain AS analyzer-build
 WORKDIR /build/static-analyzer
@@ -145,16 +227,26 @@ FROM toolchain
 WORKDIR /app
 
 COPY --from=sandbox-build /build/sandbox/target/release/sandbox-runner /app/sandbox-runner
-COPY --from=sandbox-build /build/jdi-out /app/jdi-out
+# jdi-driver.jar/.jsa (NOT the old exploded jdi-out/ dir): the JDI driver's
+# classpath + its CDS archive — see the sandbox-build stage's own comment
+# on the RUN step that generates these, and java.rs's DRIVER_CDS_JAR/
+# DRIVER_CDS_ARCHIVE for how they're referenced at runtime. Copied to the
+# SAME /app/... path used both when the archive was generated (sandbox-
+# build stage, above) and when java.rs invokes java — CDS validates the
+# app classpath by exact path string, so this can't be renamed/moved here
+# without also regenerating the archive against the new path.
+COPY --from=sandbox-build /app/jdi-driver.jar /app/jdi-driver.jar
+COPY --from=sandbox-build /app/jdi-driver.jsa /app/jdi-driver.jsa
 COPY --from=analyzer-build /build/static-analyzer/target/release/static-analyzer /app/static-analyzer
 COPY --from=api-build /build/api/target/quarkus-app /app/quarkus-app
 
 # Minimal, isolated rootfs per sandboxed language (java.rs/csharp.rs --chroot
 # target, replacing --chroot / -- see sandbox/build-minimal-rootfs.sh's own
 # header comment for the full rationale/derivation, and tasks.md "Filesystem
-# temporário/efêmero"). Must run AFTER the COPYs above: it reads /app/jdi-out
-# and /app/sandbox-runner (already-built artifacts) to stage them into the new
-# roots, not the source tree.
+# temporário/efêmero"). Must run AFTER the COPYs above: it reads
+# /app/jdi-driver.jar, /app/jdi-driver.jsa, and /app/sandbox-runner
+# (already-built artifacts) to stage them into the new roots, not the
+# source tree.
 COPY sandbox/build-minimal-rootfs.sh /tmp/build-minimal-rootfs.sh
 RUN bash /tmp/build-minimal-rootfs.sh /opt/sandbox-rootfs && rm /tmp/build-minimal-rootfs.sh
 

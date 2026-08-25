@@ -72,8 +72,13 @@ const JAVA_SECCOMP_POLICY: &str = r#"ALLOW {
     // MemoryHog.java/BigCountLoop.java.
     brk, mmap, munmap, mprotect, madvise,
 
-    // File I/O: reading class files (bootclasspath + /app/jdi-out + the
-    // user's own .java source dir) and the driver's own stdout/stderr.
+    // File I/O: reading class files (bootclasspath + /app/jdi-driver.jar +
+    // the user's own .java source dir) and the driver's own stdout/stderr.
+    // Also covers reading the CDS archives (/opt/.../classes.jsa, the JDK's
+    // own default archive, and /app/jdi-driver.jsa, this project's own --
+    // see DRIVER_CDS_ARCHIVE in this file) -- same syscalls, no new ones
+    // needed for CDS, see the `newfstat` note below for how the DEPENDENCY
+    // on being able to read a .jsa file at all was originally found.
     // FilesystemEscape.java's read of /etc/shadow and write to /tmp use
     // these same syscalls (openat/read/write) -- nsjail's chroot/mount
     // setup, not seccomp, is what's supposed to gate what paths succeed,
@@ -94,6 +99,38 @@ const JAVA_SECCOMP_POLICY: &str = r#"ALLOW {
     newfstat, newfstatat, statx, statfs, faccessat, readlinkat,
     getdents64, getcwd, fchdir, mkdirat, unlinkat, ftruncate, flock,
     dup3, ioctl, fcntl, pipe2,
+    // Real gap found and closed during the Fase 2 pentest (tasks.md "Testes
+    // de fuga de sandbox"), NOT part of the original strace-derived set
+    // above: symlinkat/linkat/renameat/fchmodat/utimensat back
+    // java.nio.file.Files.createSymbolicLink/createLink/move/
+    // setPosixFilePermissions/setLastModifiedTime, none of which any of the
+    // 13 test-snippets happens to call, so none were caught by the original
+    // derivation. Missing them broke the SAME layering principle already
+    // documented for openat/write/network above (the read-only chroot, not
+    // seccomp, is supposed to be what rejects a mutating filesystem call) --
+    // but WORSE than just "an uncatchable SIGSYS instead of a clean
+    // exception": confirmed empirically (test-snippets/SymlinkEscape.java)
+    // that a target killed this way reports its OWN exit code as 0 to
+    // jdi/Debugger.java's `vm.process().exitValue()' check, not the
+    // conventional 128+signal every other kill path in this codebase relies
+    // on -- so the existing "non-zero exit -> emit a clean `error` event"
+    // fix (see tasks.md, the "qualquer exceção não capturada" bug) never
+    // fires either. Net effect before this fix: ANY sandboxed program
+    // (malicious or not) that happened to call one of these five NIO
+    // operations had its execution silently truncated at that exact line,
+    // reported as `status: "completed"` with no trace of what happened --
+    // the exact "silently reported as completed" bug class already fixed
+    // once this session for uncaught exceptions, just reached via a
+    // different, seccomp-specific path this time, and NOT caught by that
+    // earlier fix. Allowing these five here (validated: with them allowed,
+    // the exact same calls now surface as a normal, catchable
+    // `FileSystemException: Read-only file system`/`NoSuchFileException`,
+    // same as every other write attempt already documented) restores the
+    // intended layering without weakening the read-only chroot itself --
+    // see tasks.md for the full empirical trail (strace showing `= ?` mid-
+    // syscall, the A/B control test against the known-working openat-
+    // removal case, and the fixed re-run).
+    symlinkat, linkat, renameat, fchmodat, utimensat,
 
     // Sockets: the driver and target JVM talk JDWP over a loopback TCP
     // socket (JDI's CommandLineLaunch connector) -- required for the
@@ -108,6 +145,25 @@ const JAVA_SECCOMP_POLICY: &str = r#"ALLOW {
     socket, connect, bind, listen, accept,
     getsockname, getsockopt, setsockopt, shutdown, socketpair,
     sendto, recvfrom, recvmsg,
+    // sendmmsg: second real gap found during the Fase 2 pentest (tasks.md
+    // "Testes de fuga de sandbox"), same "silent SIGSYS" category as the
+    // symlinkat group above but found via a completely ordinary code path
+    // (`new InetSocketAddress("localhost", 22)`), not an escape attempt --
+    // resolving a hostname NOT already present in the synthetic /etc/hosts
+    // this minimal rootfs ships (see build-minimal-rootfs.sh: only
+    // resolv.conf/hosts/nsswitch.conf placeholders, no real "localhost"
+    // entry) makes glibc's resolver fall back to querying 127.0.0.1:53 --
+    // confirmed via strace: `connect(AF_INET, ...:53)` (already allowed)
+    // then `sendmmsg(...)` (NOT allowed) -- `+++ killed by SIGSYS +++`. Note
+    // this is orthogonal to the network-NAMESPACE isolation already
+    // documented above: CLONE_NEWNET means that UDP query can never reach
+    // anything real regardless (loopback inside the jail's own netns has no
+    // DNS server listening either), so allowing this syscall doesn't open
+    // any new network reachability -- it only lets the ALREADY-guaranteed-
+    // to-fail query surface as the intended clean, catchable
+    // UnknownHostException instead of an uncatchable crash, consistent with
+    // every other syscall in this Sockets group.
+    sendmmsg,
 
     // Time/scheduling/misc the JVM needs at startup and during normal
     // operation (System.nanoTime, GC pacing, thread scheduling hints,
@@ -154,6 +210,26 @@ const MINIMAL_ROOTFS_JAVA: &str = "/opt/sandbox-rootfs/java";
 // pre-created at image-build time (build-minimal-rootfs.sh), not the
 // workdir's own real path.
 const JAIL_WORKDIR: &str = "/workdir";
+
+// CDS (Class Data Sharing) for the JDI DRIVER's own classpath -- see
+// Dockerfile.api's identical comment on the sandbox-build stage's
+// archive-generation step (right after `javac ... Debugger.java`) for the
+// full mechanism/rationale and tasks.md's "Pool de JVMs pré-aquecidas ...
+// ou CDS" entry for the empirical class-loading breakdown and measured
+// before/after numbers behind this decision.
+//
+// jdi-driver.jar replaces the old exploded jdi-out/ classes directory as
+// the driver's classpath specifically BECAUSE dynamic CDS archiving
+// (-XX:ArchiveClassesAtExit, the mechanism used to generate
+// jdi-driver.jsa) refuses to even dump a directory classpath entry --
+// confirmed empirically ("Error: non-empty directory in paths", JDK-8304484
+// -- see the Dockerfile.api comment). The archive's app-classpath entry is
+// matched by EXACT path string at runtime, so this same absolute path is
+// what the archive was generated against at image-build time -- do not
+// rename/move this without regenerating the archive to match, or CDS will
+// (harmlessly, see -Xshare:auto below) just stop being used.
+const DRIVER_CDS_JAR: &str = "/app/jdi-driver.jar";
+const DRIVER_CDS_ARCHIVE: &str = "/app/jdi-driver.jsa";
 
 pub struct RunOptions {
     pub time_limit_secs: String,
@@ -272,21 +348,42 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         // build-minimal-rootfs.sh's `mkdir ".../workdir"`), sidestepping the
         // problem entirely -- --cwd and the target JVM's own classpath arg
         // below are updated to JAIL_WORKDIR too, so every reference to "where
-        // the user's compiled classes are" agrees. `/sys` is bind-mounted
-        // too (real path, not fixed -- it's a static path, always exists):
-        // some JVM startup paths read cgroup/CPU-topology files under it
-        // (confirmed via strace -- /sys/fs/cgroup/.../memory.max,
-        // /sys/devices/system/cpu/possible, etc.) purely for informational
-        // auto-sizing already overridden by this invocation's explicit
-        // -Xmx/-XX:MaxMetaspaceSize/-XX:MaxDirectMemorySize flags below --
-        // not a correctness dependency, bound in anyway rather than relying
-        // on every such read failing gracefully. Neither bind exposes
-        // anything this jail didn't already have access to before this
-        // change: /sys is non-sensitive kernel/hardware metadata, and
-        // src_dir is the user's own workdir the jail was always meant to see.
+        // the user's compiled classes are" agrees.
+        //
+        // Fase 2 pentest finding, fixed (tasks.md "Testes de fuga de
+        // sandbox"): this used to also `--bindmount_ro "/sys"` (real host
+        // path, read-only) — added originally because some JVM startup paths
+        // read cgroup/CPU-topology files under it (strace showed
+        // /sys/fs/cgroup/.../memory.max, /sys/devices/system/cpu/possible,
+        // etc.), purely for informational auto-sizing already overridden by
+        // this invocation's explicit -Xmx/-XX:MaxMetaspaceSize/
+        // -XX:MaxDirectMemorySize flags below. That bind turned out to leak
+        // real information from INSIDE the jail: because the outer container
+        // itself runs with `--cgroupns=host` (a separate, already-accepted
+        // tradeoff for nsjail's own cgroup management, see this file's
+        // module doc comment / tasks.md), binding the host's real /sys
+        // pulled the HOST's entire /sys/fs/cgroup tree into every jailed
+        // execution -- confirmed empirically with a real Java program
+        // (`CgroupLeak.java`-style probe) listing `/sys/fs/cgroup` from
+        // INSIDE a running jail: sibling `NSJAIL.<pid>` cgroups from
+        // OTHER concurrent executions were visible by name, and
+        // `/sys/fs/cgroup/docker/memory.current` (host-wide aggregate
+        // container memory) was readable with a real, current byte count.
+        // Individual sibling NSJAIL.<pid> cgroup files themselves were
+        // separately blocked by uid-based DAC permissions (good), but the
+        // directory names and the aggregate host counters were not --
+        // cross-execution/host information disclosure that has nothing to
+        // do with running Java code correctly (the comment above already
+        // says this was never a correctness dependency, just belt-and-
+        // braces against every such read failing gracefully). Removed
+        // entirely instead of trying to scope it down to a safe subpath:
+        // re-validated the full test-snippets/ suite with it gone (see
+        // tasks.md) and nothing regressed -- the informational reads this
+        // was added for simply fail closed (ENOENT against an empty /sys
+        // inside the minimal rootfs) exactly as the original comment
+        // predicted they safely could.
         "--chroot", MINIMAL_ROOTFS_JAVA,
         "--bindmount_ro", &format!("{}:{}", src_dir.to_str().unwrap(), JAIL_WORKDIR),
-        "--bindmount_ro", "/sys",
         "--cwd", JAIL_WORKDIR,
         // NOT --quiet: nsjail's own INFO-level log line ("run time >= time
         // limit ... Killing it") is the ONLY way to tell a --time_limit
@@ -329,10 +426,57 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         // silently break.
         "-XX:MaxDirectMemorySize=128m",
         &format!("-Dspike.sample={}", opts.sample_n),
-        "-cp", "/app/jdi-out",
+        // CDS for the DRIVER's own classpath -- see DRIVER_CDS_JAR's doc
+        // comment above for the full mechanism/rationale.
+        //
+        // -Xshare:auto (the JDK's own default -- spelled out explicitly
+        // here as a documented invariant, not because it changes behavior)
+        // instead of -Xshare:on: `on` turns ANY archive mismatch (a stale
+        // .jsa left over from an image built against a different
+        // Debugger.class, a corrupt file, a differently-installed JDK on
+        // the runtime side -- see the .ci/Dockerfile fresh-runtime-stage
+        // caveat in its own comment) into a HARD VM startup failure, i.e.
+        // every single Java execution would break, not just lose the
+        // speedup. `auto` was confirmed empirically (tasks.md) to fall back
+        // silently to the JDK's own always-present base/default archive on
+        // ANY mismatch -- wrong app classpath, corrupted/truncated file,
+        // even a completely MISSING archive file -- instead of crashing.
+        // `-Xshare:on` was used ONLY as a one-time manual validation step
+        // (proving the archive is genuinely active and not silently
+        // unused, per this project's "never assume, validate" discipline)
+        // -- deliberately not shipped here.
+        "-Xshare:auto",
+        &format!("-XX:SharedArchiveFile={DRIVER_CDS_ARCHIVE}"),
+        "-cp", DRIVER_CDS_JAR,
         "Debugger",
         class_name,
         &format!(
+            // Deliberately NOT given a -XX:SharedArchiveFile of its own:
+            // this is the TARGET jvm, whose classpath is JAIL_WORKDIR -- a
+            // per-execution, always-different (bind-mounted from the real,
+            // dynamically-named workdir) directory containing the USER's
+            // own just-compiled class(es). Confirmed empirically (tasks.md)
+            // that this genuinely can't/shouldn't be done, not just
+            // skipped for convenience: (a) dynamic CDS archiving flatly
+            // refuses to dump a directory classpath entry at all ("Cannot
+            // have non-empty directory in paths"), so there is no way to
+            // even BUILD an archive covering a directory classpath like
+            // this one; (b) even a same-PATH-different-CONTENT jar
+            // (simulating a fixed mount point with different user bytecode
+            // every run, which is what this would require) fails app-
+            // classpath validation at runtime -- an archive trained on one
+            // program's bytecode can never validate against a DIFFERENT
+            // program's bytecode, which is every real execution here by
+            // definition, since the whole point of this sandbox is running
+            // arbitrary user code. And (c) there's little to gain even if
+            // it did work: instrumenting class loading
+            // (-Xlog:class+load=info) on the plain debuggee path -- even
+            // WITH a real JDWP agent attached (-agentlib:jdwp) -- showed
+            // only 3-4 classes outside the JDK's own default/base archive.
+            // Essentially all of the ~520-class gap this CDS work closes
+            // lives in the DRIVER process (com.sun.jdi.*/com.sun.tools.jdi.*
+            // alone is ~310 of those classes, from importing the jdk.jdi
+            // module directly) -- not here.
             "-Xlog:os+container=off -XX:CompressedClassSpaceSize=64m -cp {JAIL_WORKDIR} -Xmx256m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=256m"
         ),
     ]);

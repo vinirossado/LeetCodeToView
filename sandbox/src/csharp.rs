@@ -124,6 +124,30 @@ const CSHARP_SECCOMP_POLICY: &str = r#"ALLOW {
     newfstat, newfstatat, statx, statfs, faccessat, readlinkat,
     getdents64, unlinkat, ftruncate, linkat, fchmod, mknodat, chdir,
     ioctl, fcntl, pipe2,
+    // Real gap found during the Fase 2 pentest (tasks.md "Testes de fuga de
+    // sandbox"), C# side of the SAME fix already applied to
+    // JAVA_SECCOMP_POLICY -- see that constant's identical comment in
+    // java.rs for the full empirical trail (strace showing the exact
+    // syscalls, the A/B control confirming a missing syscall here means an
+    // uncatchable SIGSYS instead of the intended clean, catchable
+    // filesystem exception). Confirmed via the same throwaway-probe
+    // methodology as this const's own doc comment above (not the official
+    // test-snippets-csharp/ suite, which happens to call none of these):
+    // `System.IO.File.CreateSymbolicLink`/`Move`/`SetUnixFileMode` map to
+    // symlinkat/renameat/fchmodat respectively (`linkat`/`fchmod` were
+    // already allowed above, for dbgshim's own unrelated setup) --
+    // `utimensat` (File.SetLastWriteTimeUtc) added alongside for the same
+    // reason, confirmed via its own isolated strace. NOTE: unlike the Java
+    // case, the end-to-end symptom here was masked by the ALREADY-DOCUMENTED
+    // open item on this stepper getting stuck on certain CLR-internal
+    // transitions (see tasks.md, the StartCore/exception-unwind items) --
+    // calling any of these still timed out rather than turning into a clean
+    // in-product exception either way, so this fix is defense-in-depth /
+    // consistency with the stated design principle (chroot, not seccomp, is
+    // supposed to gate which paths succeed), not something fully validated
+    // end-to-end the way the Java fix was — see tasks.md for the honest
+    // writeup of what this did and did not confirm.
+    symlinkat, renameat, fchmodat, utimensat,
 
     // Sockets: CoreCLR opens a local Unix-domain diagnostics IPC socket
     // (`/tmp/dotnet-diagnostic-<pid>-...-socket`) at startup by default,
@@ -354,14 +378,26 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
         // is bound because CoreCLR's crypto RNG opens it directly (confirmed
         // via strace — NOT covered by the `getrandom` syscall alone, unlike
         // Java, which never touches this device — see
-        // build-minimal-rootfs.sh's comment on the same finding). `/sys` —
-        // same informational-only cgroup/topology reads as java.rs's
-        // identical bind, already overridden here by the explicit
-        // DOTNET_GCHeapHardLimit env below.
+        // build-minimal-rootfs.sh's comment on the same finding).
+        //
+        // Fase 2 pentest finding, fixed (tasks.md "Testes de fuga de
+        // sandbox"): this used to also `--bindmount_ro "/sys"`, same
+        // informational-only cgroup/topology-read rationale as java.rs's
+        // identical bind (already overridden here by the explicit
+        // DOTNET_GCHeapHardLimit env below) — and the SAME real information-
+        // disclosure bug java.rs's identical removal fixes: binding the
+        // host's real /sys pulls in the whole host /sys/fs/cgroup tree
+        // (because the OUTER container runs `--cgroupns=host`), letting
+        // jailed code list sibling `NSJAIL.<pid>` cgroup names from OTHER
+        // concurrent executions and read host-wide aggregate counters like
+        // `/sys/fs/cgroup/docker/memory.current`. Not re-derived separately
+        // for C# (same underlying mechanism, same fix) — see java.rs's
+        // matching comment for the full empirical trail. Removed; the
+        // test-snippets-csharp/ suite was re-validated with it gone (see
+        // tasks.md) and nothing regressed.
         "--chroot", MINIMAL_ROOTFS_CSHARP,
         "--bindmount_ro", &format!("{}:{}", workdir.to_str().unwrap(), JAIL_WORKDIR),
         "--bindmount_ro", "/dev/urandom",
-        "--bindmount_ro", "/sys",
         "--cwd", jail_cwd.to_str().unwrap(),
         "--env", "DOTNET_ROOT=/usr/share/dotnet",
         "--env", "PATH=/usr/share/dotnet:/usr/bin:/bin",

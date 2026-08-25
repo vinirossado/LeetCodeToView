@@ -88,6 +88,43 @@ COPY sandbox/ .
 RUN cargo build --release
 RUN javac -encoding UTF-8 -d /build/jdi-out jdi/Debugger.java
 
+# ─── CDS (Class Data Sharing) archive for the JDI driver ──────────────────
+# Same mechanism/rationale as Dockerfile.api's identical (much more
+# thoroughly commented) step — jar up the driver's fixed classpath
+# (dynamic CDS archiving, -XX:ArchiveClassesAtExit, refuses to dump a
+# directory classpath entry, confirmed empirically) and train a dynamic
+# archive against it via a real end-to-end run of test-snippets/
+# Trivial.java through the actual Debugger driver. Generated at the SAME
+# /app/... path the final runtime stage below copies it to (CDS validates
+# the app classpath by exact path string). This RUN sits AFTER the
+# `javac ... Debugger.java` layer above, so normal Docker layer caching
+# already invalidates/regenerates it whenever Debugger.java's compiled
+# output changes — no --no-cache needed. `test -s`: fail the build loudly
+# if the archive didn't come out, same "never assume, validate" discipline
+# as the rest of this project — safe to be this strict because java.rs
+# ships -Xshare:auto (not `on`), so a missing/bad archive at runtime would
+# only silently disable this optimization, not crash executions.
+#
+# CAVEAT specific to THIS file (not Dockerfile.api): unlike Dockerfile.api,
+# whose final runtime stage is `FROM toolchain` (the exact same image this
+# archive is trained in), this file's `runtime` stage below is a FRESH
+# `debian:bookworm-slim` base with its OWN separate `apt-get install
+# temurin-25-jdk` — so in principle a different JDK point-release resolved
+# by that separate install could shift the archived boot-classpath's
+# absolute path enough to fail CDS's own validation. Not a correctness risk
+# either way: -Xshare:auto (see java.rs) falls back to the JDK's own
+# default archive silently on any such mismatch instead of crashing — this
+# is flagged here as a possible (not confirmed) source of a smaller-than-
+# expected win on THIS image specifically, not as a bug.
+RUN mkdir -p /app /build/cds-train && \
+    jar cf /app/jdi-driver.jar -C /build/jdi-out . && \
+    cp test-snippets/Trivial.java /build/cds-train/ && \
+    javac -encoding UTF-8 -g -d /build/cds-train /build/cds-train/Trivial.java && \
+    java -Xlog:cds -XX:ArchiveClassesAtExit=/app/jdi-driver.jsa \
+        -cp /app/jdi-driver.jar Debugger Trivial \
+        "-cp /build/cds-train -Xmx256m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=256m" && \
+    test -s /app/jdi-driver.jsa
+
 # ─── Build static-analyzer ────────────────────────────────────────────────
 FROM toolchain AS analyzer-build
 WORKDIR /build/static-analyzer
@@ -180,14 +217,21 @@ RUN curl -sSL https://github.com/Samsung/netcoredbg/releases/download/3.0.0-1006
 
 COPY --from=sandbox-build /usr/local/bin/nsjail /usr/local/bin/nsjail
 COPY --from=sandbox-build /build/sandbox/target/release/sandbox-runner /app/sandbox-runner
-COPY --from=sandbox-build /build/jdi-out /app/jdi-out
+# jdi-driver.jar/.jsa (NOT the old exploded jdi-out/ dir) — see the
+# sandbox-build stage's CDS archive-generation comment above and
+# Dockerfile.api's identical COPY comment. Same /app/... path used both at
+# archive-generation time and here (required for CDS's app-classpath
+# validation to pass).
+COPY --from=sandbox-build /app/jdi-driver.jar /app/jdi-driver.jar
+COPY --from=sandbox-build /app/jdi-driver.jsa /app/jdi-driver.jsa
 COPY --from=analyzer-build /build/static-analyzer/target/release/static-analyzer /app/static-analyzer
 COPY --from=api-build /build/api/target/quarkus-app /app/quarkus-app
 
 # Minimal, isolated rootfs per sandboxed language -- same as Dockerfile.api,
 # see sandbox/build-minimal-rootfs.sh's header comment and tasks.md
 # "Filesystem temporário/efêmero" for the full rationale. Must run AFTER the
-# COPYs above (reads the already-built /app/jdi-out and /app/sandbox-runner).
+# COPYs above (reads the already-built /app/jdi-driver.jar, /app/jdi-driver.jsa
+# and /app/sandbox-runner).
 COPY sandbox/build-minimal-rootfs.sh /tmp/build-minimal-rootfs.sh
 RUN bash /tmp/build-minimal-rootfs.sh /opt/sandbox-rootfs && rm /tmp/build-minimal-rootfs.sh
 

@@ -90,7 +90,17 @@ ln -s "/usr/lib/jvm/$(basename "$JDK_HOME")/bin/java" "$JAVA_ROOT/usr/bin/java"
 # java.rs::run's doc comment) or a human reading docs would need them.
 rm -rf "$JAVA_ROOT"/usr/lib/jvm/*/man "$JAVA_ROOT"/usr/lib/jvm/*/legal "$JAVA_ROOT"/usr/lib/jvm/*/include
 
-cp -a /app/jdi-out "$JAVA_ROOT/app/jdi-out"
+# jdi-driver.jar/.jsa: the JDI driver's own classpath (a jar, not the old
+# exploded jdi-out/ dir) plus its CDS (Class Data Sharing) archive -- see
+# Dockerfile.api's comment on the RUN step that generates these (right
+# after the `javac ... Debugger.java` step, in the sandbox-build stage) and
+# java.rs's DRIVER_CDS_JAR/DRIVER_CDS_ARCHIVE for how they're referenced at
+# runtime. Staged at the SAME /app/... path they already live at in this
+# image (not renamed) -- CDS validates the archive's app-classpath entry by
+# exact path string, so this has to match exactly what java.rs passes as
+# -cp / -XX:SharedArchiveFile.
+cp -a /app/jdi-driver.jar "$JAVA_ROOT/app/jdi-driver.jar"
+cp -a /app/jdi-driver.jsa "$JAVA_ROOT/app/jdi-driver.jsa"
 
 # System glibc libs the `java`/libjli.so/libjvm.so ELF binaries themselves
 # DT_NEED (confirmed via `ldd`, not guessed -- the JDK's OWN .so files, e.g.

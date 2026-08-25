@@ -94,15 +94,26 @@ ENV JAVA_HOME="/usr/lib/jvm/jdk-25"
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # ─── sandbox-runner + jdi Debugger (baked in, NOT hot-reloaded) ───────────
-# /app/jdi-out is not configurable — sandbox-runner/src/{main,java}.rs
-# hardcode "-cp", "/app/jdi-out" for the debuggee's classpath, so this
-# exact path has to exist regardless of dev vs. prod.
+# /app/jdi-driver.jar + /app/jdi-driver.jsa are not configurable —
+# sandbox-runner/src/java.rs hardcodes these exact paths (DRIVER_CDS_JAR/
+# DRIVER_CDS_ARCHIVE) for the driver's own classpath + CDS (Class Data
+# Sharing) archive, so they have to exist regardless of dev vs. prod — same
+# CDS mechanism/rationale as Dockerfile.api's identical (and much more
+# thoroughly commented) build step; kept here too so dev mode doesn't
+# regress just because it's a separate Dockerfile from prod.
 WORKDIR /build/sandbox
 COPY sandbox/ .
 RUN cargo build --release \
-    && mkdir -p /app \
+    && mkdir -p /app /build/jdi-out /build/cds-train \
     && cp target/release/sandbox-runner /app/sandbox-runner \
-    && javac -encoding UTF-8 -d /app/jdi-out jdi/Debugger.java
+    && javac -encoding UTF-8 -d /build/jdi-out jdi/Debugger.java \
+    && jar cf /app/jdi-driver.jar -C /build/jdi-out . \
+    && cp test-snippets/Trivial.java /build/cds-train/ \
+    && javac -encoding UTF-8 -g -d /build/cds-train /build/cds-train/Trivial.java \
+    && java -XX:ArchiveClassesAtExit=/app/jdi-driver.jsa \
+        -cp /app/jdi-driver.jar Debugger Trivial \
+        "-cp /build/cds-train -Xmx256m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=256m" \
+    && test -s /app/jdi-driver.jsa
 
 # ─── static-analyzer (baked in, NOT hot-reloaded) ─────────────────────────
 WORKDIR /build/static-analyzer
