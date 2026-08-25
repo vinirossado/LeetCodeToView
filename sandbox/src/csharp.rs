@@ -18,8 +18,9 @@
 //                              RAM total do host e estoura o rlimit_as)
 
 use std::os::raw::{c_int, c_void};
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::ptr;
 use std::time::{Duration, Instant};
 
@@ -137,17 +138,30 @@ const CSHARP_SECCOMP_POLICY: &str = r#"ALLOW {
     // symlinkat/renameat/fchmodat respectively (`linkat`/`fchmod` were
     // already allowed above, for dbgshim's own unrelated setup) --
     // `utimensat` (File.SetLastWriteTimeUtc) added alongside for the same
-    // reason, confirmed via its own isolated strace. NOTE: unlike the Java
-    // case, the end-to-end symptom here was masked by the ALREADY-DOCUMENTED
-    // open item on this stepper getting stuck on certain CLR-internal
-    // transitions (see tasks.md, the StartCore/exception-unwind items) --
-    // calling any of these still timed out rather than turning into a clean
-    // in-product exception either way, so this fix is defense-in-depth /
-    // consistency with the stated design principle (chroot, not seccomp, is
-    // supposed to gate which paths succeed), not something fully validated
-    // end-to-end the way the Java fix was — see tasks.md for the honest
-    // writeup of what this did and did not confirm.
+    // reason, confirmed via its own isolated strace.
     symlinkat, renameat, fchmodat, utimensat,
+
+    // Real gap found and fixed (tasks.md, uncaught-exception hang
+    // investigation): once the ICorDebugManagedCallback2/QueryInterface fix
+    // resolved the debugger-side deadlock that was masking this, an END-TO-
+    // END real run (POST /executions, real nsjail, not a throwaway probe)
+    // STILL hung -- confirmed via `strace -f` attached to the real nsjail
+    // invocation (not guessed): the target process printed the real
+    // exception text (CoreCLR builds it via `System.Diagnostics.
+    // StackTrace`/`System.Reflection.Metadata`, which needs `flock(pdb_fd,
+    // LOCK_SH|LOCK_NB)` on the program's own `.pdb` while resolving the
+    // stack trace's source locations) and then, after printing, terminates
+    // an unhandled managed exception the same way native Unix crash
+    // reporting does: `tgkill(pid, tid, SIGABRT)` on itself. NEITHER
+    // syscall was in this policy -- both `strace` outputs showed `= ?`
+    // (indeterminate, syscall intercepted by seccomp, process never
+    // resumes) at exactly those two calls, in that order, confirmed by
+    // adding each ONE AT A TIME (flock alone got the exception text to
+    // print but the process still hung at tgkill; adding tgkill too let
+    // ExitProcess fire and the run complete cleanly, `docker service
+    // logs`-style real end-to-end validation, not inferred from source
+    // reading).
+    flock, tgkill,
 
     // Sockets: CoreCLR opens a local Unix-domain diagnostics IPC socket
     // (`/tmp/dotnet-diagnostic-<pid>-...-socket`) at startup by default,
@@ -460,6 +474,7 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
     .args([CSHARP_WORKER_FLAG, "--dll", jail_dll.to_str().unwrap()]);
 
     let result = events::run_nsjail(cmd);
+    let mut status = result.status;
     match result.outcome {
         RunOutcome::TimedOut => events::emit(&Event::Timeout),
         RunOutcome::LikelyOom => events::emit(&Event::MemoryLimitExceeded),
@@ -467,10 +482,97 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
         RunOutcome::Normal => {
             if result.stderr_lines.iter().any(|l| l.contains("Stack overflow.")) {
                 events::emit(&Event::StackOverflow);
+            } else if let Some(start) = result.stderr_lines.iter().position(|l| l.starts_with("Unhandled exception.")) {
+                // Real bug found and fixed (tasks.md, same investigation
+                // that found the flock/tgkill seccomp gap above): once the
+                // debugger-side deadlock AND the seccomp gap were both
+                // fixed, an uncaught C# exception could for the first time
+                // ever actually reach here — exposing a THIRD, previously
+                // dormant bug, the exact same class already fixed for Java
+                // earlier this session ("any uncaught exception silently
+                // reported as completed"): cb_exit_process (com.rs) only
+                // sets PROCESS_EXITED, never inspects HOW the target died,
+                // and run_worker's final `0` return doesn't check for that
+                // either — so a target that self-terminates via `tgkill(...,
+                // SIGABRT)` after printing its exception (CoreCLR's real,
+                // confirmed-via-strace unhandled-exception termination path)
+                // looked identical to a clean exit. Confirmed via a real
+                // `POST /executions` end-to-end before this fix: `status:
+                // "completed"`, trace silently truncated right before the
+                // crash, no error event, no "after" -- the exact same
+                // silent-success bug, just with a different, previously-
+                // unreachable root cause than the Java one had.
+                //
+                // Fix: CoreCLR's own unhandled-exception message is already
+                // real, useful, user-facing text (it's the user's OWN
+                // program's exception, not sandbox internals -- same
+                // "safe and useful to show verbatim" reasoning as Java's
+                // identical fix) -- printed to stderr starting with the
+                // literal `Unhandled exception.` line, confirmed via
+                // `strace`.
+                //
+                // Real corruption found and worked around, not assumed
+                // clean: this driver's own `eprintln!("[callback] ...")`
+                // tracing (com.rs) shares the SAME inherited stderr fd as
+                // the debuggee -- both processes write to it directly, with
+                // no line-atomicity guarantee between them (same class of
+                // interleaving bug already found and fixed generically for
+                // Ruby's stdout relay earlier this session, just a
+                // different pair of writers here). Confirmed via a real
+                // `POST /executions` end-to-end, reproduced via
+                // sandbox-runner's own real entrypoint (not a synthetic
+                // probe): CoreCLR's own `write()` of "Unhandled exception. "
+                // (no trailing newline in that specific write) landed on
+                // the SAME line as this driver's very next `[callback]`
+                // trace line -- but critically, the exception's OWN
+                // type/message/stack trace (separate, later `write()` calls
+                // from CoreCLR, each newline-terminated) came through
+                // CLEAN on their own lines further down the stream, just
+                // separated from that first corrupted line by many
+                // unrelated pure `[callback] LoadAssembly!`/`LoadModule!`
+                // lines in between (module loads CoreCLR does while
+                // building the exception report). An earlier version of
+                // this fix used `take_while` and stopped at the very next
+                // pure `[callback]` line, before ever reaching the real
+                // message/stack trace further down -- confirmed via a real
+                // run producing just `"Unhandled exception. "` with
+                // everything real missing. Fixed by FILTERING (not
+                // stopping at) lines that are entirely this driver's own
+                // trace output, and truncating (not dropping) any line
+                // where the marker appears mid-line -- keeps scanning the
+                // whole captured window instead of bailing out at the
+                // first noise line.
+                let message: String = result.stderr_lines[start..]
+                    .iter()
+                    .filter(|l| !l.starts_with("[callback]") && !l.starts_with("[perf]"))
+                    .map(|l| l.split("[callback]").next().unwrap_or(l.as_str()).trim_end())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                events::emit(&Event::Error { message });
+                // Emitting the event alone isn't enough: ExecutionJob.java
+                // (API side) decides completed-vs-failed PURELY from this
+                // process's own exit code (a non-zero exit throws inside
+                // ProcessSandboxRunner, which is the only path that sets
+                // ExecutionStatus.FAILED — see that file's own doc comment)
+                // -- it never inspects event content on the success path.
+                // run_worker's own exit code stays 0 here (PROCESS_EXITED
+                // fired, no FATAL_ERROR condition applies -- the target
+                // exiting via an uncaught exception isn't one of the
+                // conditions run_worker itself currently checks for), so
+                // without this override the real, correctly-emitted error
+                // event above would still be silently reported as `status:
+                // "completed"` -- confirmed via a real end-to-end run before
+                // this exact line was added. `ExitStatus::from_raw(1 << 8)`
+                // synthesizes a normal (non-signaled) exit with code 1, the
+                // same convention `main.rs`'s `status.code().unwrap_or(1)`
+                // already expects from every other failure path in this
+                // codebase.
+                status = ExitStatus::from_raw(1 << 8);
             }
         }
     }
-    result.status
+    status
 }
 
 /// Chamado quando o binário já está DENTRO do nsjail (detectado via
@@ -664,6 +766,11 @@ pub fn run_worker(dll_file: &Path) -> i32 {
     // qualquer forma, dentro do nsjail).
     let callback_obj = Box::new(com::ManagedCallbackObj {
         vtbl: &com::MANAGED_CALLBACK_VTBL,
+        // ICorDebugManagedCallback2 — mandatory, see
+        // IID_ICORDEBUG_MANAGED_CALLBACK2's doc comment in com.rs for why
+        // (Cordb::SetManagedHandler itself fails with E_NOINTERFACE without
+        // it, for any CoreCLR >= 2.0 debuggee).
+        vtbl2: &com::MANAGED_CALLBACK2_VTBL,
         ref_count: 0,
     });
     let callback_ptr = Box::into_raw(callback_obj) as *mut c_void;

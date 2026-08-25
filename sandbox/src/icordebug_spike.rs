@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use libloading::Library;
 
-use com::{CorDebug, ManagedCallbackObj, IID_ICORDEBUG, MANAGED_CALLBACK_VTBL, S_OK};
+use com::{
+    CorDebug, ManagedCallbackObj, IID_ICORDEBUG, MANAGED_CALLBACK2_VTBL, MANAGED_CALLBACK_VTBL, S_OK,
+};
 
 // Spike: chama libdbgshim.so direto via FFI, sem passar pelo netcoredbg como
 // processo externo. Objetivo: isolar se o handshake de baixo nível (CreateProcessForLaunch
@@ -161,6 +163,9 @@ fn main() {
 
     let mut callback_obj = ManagedCallbackObj {
         vtbl: &MANAGED_CALLBACK_VTBL,
+        // See ManagedCallbackObj::vtbl2's doc comment in com.rs — mandatory
+        // for SetManagedHandler to succeed at all against a real CoreCLR.
+        vtbl2: &MANAGED_CALLBACK2_VTBL,
         ref_count: 0,
     };
     let callback_ptr = &mut callback_obj as *mut ManagedCallbackObj as *mut c_void;

@@ -178,7 +178,7 @@ pub const E_NOTIMPL: HResult = 0x80004001u32 as i32;
 pub const E_NOINTERFACE: HResult = 0x80004002u32 as i32;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Guid {
     pub data1: u32,
     pub data2: u16,
@@ -194,8 +194,34 @@ macro_rules! guid {
 
 // IIDs de cordebug.idl (dotnet/runtime) — estáveis há anos.
 pub const IID_ICORDEBUG: Guid = guid!(0x3D6F5F61, 0x7538, 0x11D3, 0x8D, 0x5B, 0x00, 0x10, 0x4B, 0x35, 0xE7, 0xEF);
+// CORRIGIDO (ver tasks.md/git log — investigação do travamento em exceção
+// C# não tratada): este valor estava ERRADO até então (0x3D6F5F62 é o IID
+// real de `ICorDebugController`, confirmado byte a byte contra o
+// cordebug.idl real do dotnet/runtime — `uuid(3d6f5f62-...)` logo acima de
+// `interface ICorDebugController : IUnknown`). Inofensivo enquanto
+// cb_query_interface não checava riid nenhum, mas agora que checa (ver
+// abaixo) precisa ser o valor certo: o IID real de `ICorDebugManagedCallback`
+// é `uuid(3d6f5f60-...)`, confirmado do mesmo jeito, um interface acima na
+// mesma família 3d6f5f6X sequencial do arquivo.
 pub const IID_ICORDEBUG_MANAGED_CALLBACK: Guid =
-    guid!(0x3D6F5F62, 0x7538, 0x11D3, 0x8D, 0x5B, 0x00, 0x10, 0x4B, 0x35, 0xE7, 0xEF);
+    guid!(0x3D6F5F60, 0x7538, 0x11D3, 0x8D, 0x5B, 0x00, 0x10, 0x4B, 0x35, 0xE7, 0xEF);
+// IUnknown's own well-known IID (00000000-0000-0000-C000-000000000046) —
+// every real COM QueryInterface must accept this in addition to whichever
+// concrete interface(s) the object implements.
+pub const IID_IUNKNOWN: Guid =
+    guid!(0x00000000, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+// ICorDebugManagedCallback2's real IID (confirmed against cordebug.idl,
+// same discipline as the others). NOT optional in practice: the real
+// `Cordb::SetManagedHandler` (dotnet/runtime's src/coreclr/debug/di/
+// rsmain.cpp) does `pCallback->QueryInterface(IID_ICorDebugManagedCallback2,
+// ...)` and, for any CoreCLR >= 2.0 debuggee (i.e. always, here), returns
+// E_NOINTERFACE outright if that fails — there's no default/fallback
+// implementation for V2 the way there is for V3/V4
+// (DefaultManagedCallback3/4). So a real ICorDebugManagedCallback2 vtable
+// (below) is mandatory just to attach at all, not an optional nicety.
+pub const IID_ICORDEBUG_MANAGED_CALLBACK2: Guid = guid!(
+    0x250E5EEA, 0xDB5C, 0x4C76, 0xB6, 0xF3, 0x8C, 0x46, 0xF1, 0x2E, 0x32, 0x03
+);
 pub const IID_ICORDEBUG_IL_FRAME: Guid =
     guid!(0x03E26311, 0x4F76, 0x11D3, 0x88, 0xC6, 0x00, 0x60, 0x97, 0x94, 0x54, 0x18);
 pub const IID_ICORDEBUG_GENERIC_VALUE: Guid =
@@ -1153,21 +1179,103 @@ pub struct ManagedCallbackVtbl {
         unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, u32) -> HResult,
 }
 
+// ICorDebugManagedCallback2's own vtable (method order/signatures straight
+// from cordebug.idl, same "don't guess the ABI" discipline as everywhere
+// else in this file) — see IID_ICORDEBUG_MANAGED_CALLBACK2's doc comment
+// for why this is mandatory, not optional. Every method here just calls
+// Continue() on the relevant controller (pAppDomain, or pProcess for the
+// Connection notifications), same "the driver doesn't act on this
+// specific event, just resume" behavior every uninteresting V1 callback
+// already has (see e.g. cb_name_change) — this project doesn't do
+// Edit-and-Continue, MDAs, or multi-process/connection scenarios, so
+// there's nothing more meaningful to do with any of these; the one V2
+// callback that DOES matter (Exception, the JMC "user first chance"
+// notification) gets the exact same Continue()-only behavior real V1
+// cb_exception already has, which is all this codebase currently acts on
+// exceptions.
+#[repr(C)]
+pub struct ManagedCallback2Vtbl {
+    pub query_interface: unsafe extern "C" fn(*mut c_void, *const Guid, *mut *mut c_void) -> HResult,
+    pub add_ref: unsafe extern "C" fn(*mut c_void) -> u32,
+    pub release: unsafe extern "C" fn(*mut c_void) -> u32,
+    pub function_remap_opportunity:
+        unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void, u32) -> HResult,
+    pub create_connection: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *const u16) -> HResult,
+    pub change_connection: unsafe extern "C" fn(*mut c_void, *mut c_void, u32) -> HResult,
+    pub destroy_connection: unsafe extern "C" fn(*mut c_void, *mut c_void, u32) -> HResult,
+    pub exception:
+        unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, u32, i32, u32) -> HResult,
+    pub exception_unwind: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, i32, u32) -> HResult,
+    pub function_remap_complete: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> HResult,
+    pub mda_notification: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> HResult,
+}
+
 #[repr(C)]
 pub struct ManagedCallbackObj {
     pub vtbl: *const ManagedCallbackVtbl,
+    // Second interface (ICorDebugManagedCallback2) via the standard COM
+    // "vtable multiple inheritance" trick: this field's own ADDRESS (not
+    // `vtbl` above) is what cb_query_interface hands back when asked for
+    // IID_ICORDEBUG_MANAGED_CALLBACK2 (see that function) — the caller then
+    // treats that address as a `ICorDebugManagedCallback2*` and dereferences
+    // ITS first 8 bytes to find this vtable, exactly the way it dereferences
+    // `vtbl` above to find the V1 one. MUST stay the second field (straight
+    // after `vtbl`) for cb_query_interface's `offset_of!` math below to be
+    // correct — moving it would silently break the interface identity this
+    // whole mechanism depends on.
+    pub vtbl2: *const ManagedCallback2Vtbl,
     pub ref_count: u32,
 }
 
+// FIX (ver tasks.md/git log — travamento em exceção C# não tratada,
+// investigação com símbolos de debug reais do CoreCLR resolvidos via
+// dotnet-symbol): esta função costumava aceitar QUALQUER riid sem checar,
+// sempre devolvendo `this` — "spike: aceita qualquer IID (não checa),
+// suficiente pro runtime aceitar nosso objeto como ICorDebugManagedCallback".
+// Isso é uma violação real do contrato COM (QueryInterface DEVE recusar
+// interfaces não implementadas) com uma consequência concreta e confirmada
+// via gdb + símbolos reais: mscordbi.so, ao inicializar, faz
+// `pCallback->QueryInterface(IID_ICorDebugManagedCallback2, ...)` (código
+// real em dotnet/runtime's src/coreclr/debug/di/process.cpp) pra descobrir
+// se o cliente also implementa a interface V2 (FunctionRemapOpportunity/
+// CreateConnection/ChangeConnection/DestroyConnection/Exception(6 args)/
+// ExceptionUnwind/FunctionRemapComplete/MDANotification — cordebug.idl).
+// Como essa função sempre respondia S_OK com o MESMO ponteiro de vtable
+// (moldado só pro layout de ICorDebugManagedCallback V1), mscordbi passava
+// a acreditar que tínhamos ManagedCallback2 e, pro evento "JMC user first
+// chance exception" (Debugger::SendExceptionEventsWorker, ramo
+// `pDebugMethodInfo->IsJMCFunction()` — exatamente o nosso caso, já que
+// setamos JMC no módulo do usuário), invocava o slot 7 do vtable V2
+// (Exception, 6 args) — que no NOSSO vtable (moldado só pra V1) é
+// `eval_complete` (4 args, sempre retorna S_OK sem nunca chamar
+// Continue()). Resultado: `Debugger::SendExceptionHelperAndBlock` já tinha
+// chamado `TrapAllRuntimeThreads()` esperando um Continue() que nunca
+// chegava — deadlock genuíno do CoreCLR em
+// `Thread::RareDisablePreemptiveGC` -> `Thread::WaitSuspendEvents`,
+// confirmado via backtrace resolvido com símbolos de debug reais do
+// libcoreclr.so (dotnet-symbol, ver tasks.md). Fix: checar riid de
+// verdade, só aceitar IUnknown e o IID real de ICorDebugManagedCallback
+// (não os V2/V3 que este código não implementa) — mscordbi então sabe que
+// não pode contar com V2/V3 e não tenta mais essa chamada corrompida.
 unsafe extern "C" fn cb_query_interface(
     this: *mut c_void,
-    _riid: *const Guid,
+    riid: *const Guid,
     ppv: *mut *mut c_void,
 ) -> HResult {
-    // spike: aceita qualquer IID (não checa), suficiente pro runtime aceitar
-    // nosso objeto como ICorDebugManagedCallback.
-    *ppv = this;
-    S_OK
+    let requested = *riid;
+    if requested == IID_IUNKNOWN || requested == IID_ICORDEBUG_MANAGED_CALLBACK {
+        *ppv = this;
+        S_OK
+    } else if requested == IID_ICORDEBUG_MANAGED_CALLBACK2 {
+        // Return the ADDRESS of the vtbl2 field, not `this` — see
+        // ManagedCallbackObj::vtbl2's doc comment for why.
+        let offset = std::mem::offset_of!(ManagedCallbackObj, vtbl2);
+        *ppv = (this as *mut u8).add(offset) as *mut c_void;
+        S_OK
+    } else {
+        *ppv = std::ptr::null_mut();
+        E_NOINTERFACE
+    }
 }
 
 unsafe extern "C" fn cb_add_ref(this: *mut c_void) -> u32 {
@@ -1183,6 +1291,132 @@ unsafe extern "C" fn cb_release(this: *mut c_void) -> u32 {
     }
     (*obj).ref_count
 }
+
+// Recovers the real ManagedCallbackObj base address from a `this` pointer
+// that arrived through the V2 interface (i.e. pointing at the `vtbl2`
+// field, per cb_query_interface's IID_ICORDEBUG_MANAGED_CALLBACK2 branch
+// above) — the inverse of that same offset_of! math.
+unsafe fn managed_callback_base_from_v2(v2_this: *mut c_void) -> *mut c_void {
+    let offset = std::mem::offset_of!(ManagedCallbackObj, vtbl2);
+    (v2_this as *mut u8).sub(offset) as *mut c_void
+}
+
+unsafe extern "C" fn cb2_query_interface(
+    this: *mut c_void,
+    riid: *const Guid,
+    ppv: *mut *mut c_void,
+) -> HResult {
+    cb_query_interface(managed_callback_base_from_v2(this), riid, ppv)
+}
+
+unsafe extern "C" fn cb2_add_ref(this: *mut c_void) -> u32 {
+    cb_add_ref(managed_callback_base_from_v2(this))
+}
+
+unsafe extern "C" fn cb2_release(this: *mut c_void) -> u32 {
+    cb_release(managed_callback_base_from_v2(this))
+}
+
+// See ManagedCallback2Vtbl's doc comment: every method here just resumes
+// the debuggee via Continue() on the relevant controller — the same
+// "driver doesn't act on this notification" behavior every uninteresting
+// V1 callback already has. `exception` in particular is the one that
+// matters: it's what fixes the uncaught-exception hang (see
+// IID_ICORDEBUG_MANAGED_CALLBACK2's doc comment) by giving CoreCLR's real
+// "JMC user first chance" notification (Debugger::SendExceptionEventsWorker
+// -> SendExceptionHelperAndBlock, confirmed via a symbol-resolved gdb
+// backtrace — see tasks.md) an actual Continue() to unblock on, instead of
+// silently landing on an unrelated V1 callback slot the way it did before
+// this V2 vtable existed.
+unsafe extern "C" fn cb2_function_remap_opportunity(
+    _this: *mut c_void,
+    app_domain: *mut c_void,
+    _thread: *mut c_void,
+    _old_function: *mut c_void,
+    _new_function: *mut c_void,
+    _old_il_offset: u32,
+) -> HResult {
+    continue_(app_domain)
+}
+
+unsafe extern "C" fn cb2_create_connection(
+    _this: *mut c_void,
+    process: *mut c_void,
+    _connection_id: u32,
+    _connection_name: *const u16,
+) -> HResult {
+    continue_(process)
+}
+
+unsafe extern "C" fn cb2_change_connection(
+    _this: *mut c_void,
+    process: *mut c_void,
+    _connection_id: u32,
+) -> HResult {
+    continue_(process)
+}
+
+unsafe extern "C" fn cb2_destroy_connection(
+    _this: *mut c_void,
+    process: *mut c_void,
+    _connection_id: u32,
+) -> HResult {
+    continue_(process)
+}
+
+unsafe extern "C" fn cb2_exception(
+    _this: *mut c_void,
+    app_domain: *mut c_void,
+    _thread: *mut c_void,
+    _frame: *mut c_void,
+    _offset: u32,
+    _event_type: i32,
+    _flags: u32,
+) -> HResult {
+    continue_(app_domain)
+}
+
+unsafe extern "C" fn cb2_exception_unwind(
+    _this: *mut c_void,
+    app_domain: *mut c_void,
+    _thread: *mut c_void,
+    _event_type: i32,
+    _flags: u32,
+) -> HResult {
+    continue_(app_domain)
+}
+
+unsafe extern "C" fn cb2_function_remap_complete(
+    _this: *mut c_void,
+    app_domain: *mut c_void,
+    _thread: *mut c_void,
+    _function: *mut c_void,
+) -> HResult {
+    continue_(app_domain)
+}
+
+unsafe extern "C" fn cb2_mda_notification(
+    _this: *mut c_void,
+    controller: *mut c_void,
+    _thread: *mut c_void,
+    _mda: *mut c_void,
+) -> HResult {
+    continue_(controller)
+}
+
+pub static MANAGED_CALLBACK2_VTBL: ManagedCallback2Vtbl = ManagedCallback2Vtbl {
+    query_interface: cb2_query_interface,
+    add_ref: cb2_add_ref,
+    release: cb2_release,
+    function_remap_opportunity: cb2_function_remap_opportunity,
+    create_connection: cb2_create_connection,
+    change_connection: cb2_change_connection,
+    destroy_connection: cb2_destroy_connection,
+    exception: cb2_exception,
+    exception_unwind: cb2_exception_unwind,
+    function_remap_complete: cb2_function_remap_complete,
+    mda_notification: cb2_mda_notification,
+};
 
 /// Resolves the IL-offset range covering the CURRENT position of `thread`'s
 /// active frame (see STEP_RANGE_RESOLVER's doc comment) — `None` whenever a
