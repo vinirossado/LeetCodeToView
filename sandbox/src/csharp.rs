@@ -31,6 +31,124 @@ use crate::pdb::PortablePdb;
 
 pub const CSHARP_WORKER_FLAG: &str = "--csharp-worker";
 
+// Fase 2 hardening: minimal default-deny seccomp-bpf allowlist for the
+// jailed process -- see java.rs's JAVA_SECCOMP_POLICY doc comment for the
+// kafel syntax verification (same nsjail/kafel source, same `--help`
+// check), shared here rather than repeated. Key difference from Java:
+// there's no separate "javac equivalent" running outside the jail here --
+// `dotnet build` happens on the API side (ProcessSandboxRunner, outside
+// sandbox-runner entirely) before sandbox-runner is even invoked, so
+// everything THIS binary does once re-exec'd into the jail (--csharp-worker,
+// see run_worker below) -- dlopen'ing libdbgshim.so, the dbgshim/ICorDebug
+// handshake, AND launching+debugging the actual `dotnet <dll>` debuggee
+// child process -- has to be covered by this one policy.
+//
+// Derived the same way as Java's: UNION of `strace -f` runs of the exact
+// `/app/sandbox-runner --csharp-worker --dll <dll>` command line (same
+// self-re-exec this file performs below, run directly instead of via
+// nsjail) across every project in `test-snippets-csharp/`, PLUS two
+// throwaway probes (not committed test-snippets -- the official C# suite
+// has no equivalent of Java's NetworkEscape.java/FilesystemEscape.java)
+// mirroring those two Java snippets, to check the same escape-attempt path
+// empirically instead of leaving it silently unvalidated. Real finding from
+// that probe, not a guess: a raw `Socket.Connect` in C# already gets
+// blocked by THIS sandbox's own pre-existing multi-thread guard (>2
+// distinct ICorDebug threads = blocked, MVP scope, see com.rs) before ever
+// reaching a real connect() syscall -- .NET's socket layer lazily spins up
+// an internal epoll-readiness thread on first use, which trips that guard
+// first. So unlike Java, raw sockets in C# are already a dead end today for
+// a reason entirely unrelated to seccomp, and this policy does NOT need
+// connect/accept/etc. -- omitting them doesn't introduce any new crash
+// class, the attempt already ends in a caught "error" event either way.
+// (The filesystem half of that probe -- File.ReadAllText("/etc/shadow"),
+// File.WriteAllText outside cwd -- needed nothing beyond what the official
+// suite already exercises.) Same arm64-derivation caveat as java.rs's
+// JAVA_SECCOMP_POLICY applies here too -- not verified on amd64.
+const CSHARP_SECCOMP_POLICY: &str = r#"ALLOW {
+    // Process/thread lifecycle. execve is the dbgshim `CreateProcessForLaunch`
+    // call actually launching `/usr/share/dotnet/dotnet <dll>` as a real
+    // (suspended, then resumed) child process. clone covers CoreCLR's
+    // internal threads (GC, thread pool, finalizer) and this worker
+    // process's own threads.
+    execve, clone, exit, exit_group, wait4,
+    set_tid_address, set_robust_list, rseq, prctl,
+    gettid, getpid, geteuid, getsid,
+    // futex: NOT optional -- CoreCLR's GC/thread-pool/finalizer threads and
+    // this worker's own ICorDebug callback synchronization all depend on
+    // it, even for a single-user-thread program. ppoll is used waiting on
+    // the dbgshim/debug-pipe file descriptors. prlimit64 is CoreCLR reading
+    // its own rlimits at startup (RLIMIT_AS/RLIMIT_NOFILE etc., the ones
+    // this same nsjail invocation sets) to size the GC/thread pool.
+    futex, ppoll, prlimit64,
+
+    // Memory management. memfd_create + msync are CoreCLR's GC "double
+    // mapper" (see this file's own module doc comment above -- a memfd
+    // reserved up to ~2TB of virtual address space, not real disk/RAM;
+    // --rlimit_fsize inf next to this same nsjail invocation exists for the
+    // same reason). get_mempolicy/sched_setaffinity/sched_getaffinity are
+    // the GC probing NUMA/CPU topology to size itself -- confirmed real,
+    // not assumed, since they show up even for MemoryHog's trivial single
+    // allocation loop.
+    brk, mmap, munmap, mprotect, madvise, memfd_create, msync,
+    get_mempolicy,
+
+    // File I/O: dlopen'ing libdbgshim.so, reading the target assembly
+    // (<dll>) plus its dependent CoreCLR assemblies under
+    // /usr/share/dotnet, the worker's own stdout/stderr, and (see
+    // this file's module doc comment) the debug-session handshake pipes
+    // dbgshim creates under /tmp (mknodat for the named FIFOs, linkat/
+    // fchmod as part of that same setup, chdir into the dll's own
+    // directory as cwd). Same layering note as Java's identical comment:
+    // FilesystemEscape-style attempts (confirmed via a throwaway probe --
+    // see this const's doc comment) use nothing beyond this same list.
+    openat, read, write, close, pread64, lseek,
+    // newfstat, not `fstat` -- see JAVA_SECCOMP_POLICY's identical comment
+    // in java.rs for the full story (kafel names the raw fstat(2)-on-an-
+    // open-fd syscall `newfstat` on aarch64, confirmed both by kafel's
+    // generated table AND by directly stracing this exact nsjail+seccomp
+    // invocation, which showed CoreCLR itself calling real `fstat(fd, ...)`
+    // repeatedly while loading its own assemblies).
+    newfstat, newfstatat, statx, statfs, faccessat, readlinkat,
+    getdents64, unlinkat, ftruncate, linkat, fchmod, mknodat, chdir,
+    ioctl, fcntl, pipe2,
+
+    // Sockets: CoreCLR opens a local Unix-domain diagnostics IPC socket
+    // (`/tmp/dotnet-diagnostic-<pid>-...-socket`) at startup by default,
+    // regardless of whether anything ever connects to it -- confirmed via
+    // strace (socket/bind/listen), not assumed. connect/accept/etc. are
+    // deliberately NOT here -- see this const's doc comment on why real
+    // outbound sockets are already a dead end in C# today for an unrelated
+    // reason (the multi-thread guard), so they're not "needed to run
+    // correctly" by the definition this policy uses.
+    socket, bind, listen,
+
+    // Time/scheduling/misc CoreCLR needs at startup and for its thread
+    // pool/GC (clock_gettime itself is NOT here -- see this const's doc
+    // comment: unlike Java, every trace showed it fully resolved via vDSO,
+    // no real syscall trap; kept out deliberately rather than added
+    // speculatively, per this project's "don't assume, validate
+    // empirically" rule -- if a future run ever needs the real syscall
+    // fallback, that will surface as a SIGSYS in end-to-end validation, not
+    // silently).
+    clock_nanosleep, sched_yield, sched_getaffinity, sched_setaffinity,
+    sched_getparam, sched_getscheduler, sched_setscheduler,
+    sched_get_priority_max, sched_get_priority_min,
+    sysinfo, getrandom, membarrier,
+
+    // Signals: sigaltstack backs CoreCLR's own SIGSEGV-based stack-overflow
+    // detection (StackOverflowCs -- see this file's run_outer doc comment
+    // on the "Stack overflow." stderr marker), on top of the same
+    // rt_sigaction/rt_sigprocmask/rt_sigreturn set Java needs.
+    sigaltstack, rt_sigaction, rt_sigprocmask, rt_sigreturn, restart_syscall,
+
+    // epoll: .NET's socket/thread-pool readiness engine initializes lazily
+    // on first async use (observed via the throwaway network probe, see
+    // this const's doc comment) -- kept since other legitimate async
+    // paths (Task, Timer, thread-pool work items) can trigger the same
+    // lazy init even without raw sockets.
+    epoll_create1, epoll_pwait
+} DEFAULT KILL"#;
+
 /// Caminho fixo: única cópia de libdbgshim.so na imagem, empacotada junto
 /// com o netcoredbg (confirmado via `find / -iname libdbgshim*` na imagem
 /// sandbox-spike) — o SDK do .NET puro não inclui essa lib.
@@ -93,12 +211,19 @@ fn emit_error(message: impl Into<String>) -> i32 {
 
 pub struct RunOptions {
     pub time_limit_secs: String,
+    // Sampling rate knob, C#-side port of java.rs's identical field (see
+    // that struct's doc comment) — same env var name (SPIKE_SAMPLE) on
+    // purpose, for cross-language consistency; see run_outer's doc comment
+    // on why it's forwarded explicitly via `--env` rather than relied on to
+    // pass through nsjail implicitly.
+    pub sample_n: String,
 }
 
 impl Default for RunOptions {
     fn default() -> Self {
         Self {
             time_limit_secs: std::env::var("SPIKE_TIME_LIMIT").unwrap_or_else(|_| "15".into()),
+            sample_n: std::env::var("SPIKE_SAMPLE").unwrap_or_else(|_| "1".into()),
         }
     }
 }
@@ -141,6 +266,14 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
 
     eprintln!("[sandbox-runner/csharp] rodando {dll_file:?} isolado via nsjail (self re-exec)...");
 
+    // Hoisted out instead of an inline `&format!(...)` in the args array
+    // below (the pattern java.rs and this file's other formatted nsjail
+    // args use) purely so the long "--env" comment has somewhere to attach
+    // without cluttering the array literal — a temporary inline would have
+    // lived long enough either way (extended to the end of the `cmd.args()`
+    // statement).
+    let sample_env = format!("SPIKE_SAMPLE={}", opts.sample_n);
+
     let mut cmd = Command::new("nsjail");
     cmd.args([
         "--mode", "o",
@@ -166,11 +299,29 @@ pub fn run_outer(dll_file: &Path, opts: &RunOptions) -> std::process::ExitStatus
         // separation Java gets — see the TODO on --keep_caps.
         "--uid_mapping", "65534:65534:1",
         "--gid_mapping", "65534:65534:1",
+        // Fase 2 hardening: minimal default-deny seccomp-bpf allowlist --
+        // see CSHARP_SECCOMP_POLICY's doc comment above for how this
+        // syscall set was derived and validated.
+        "--seccomp_string", CSHARP_SECCOMP_POLICY,
         "--chroot", "/",
         "--cwd", cwd.to_str().unwrap(),
         "--env", "DOTNET_ROOT=/usr/share/dotnet",
         "--env", "PATH=/usr/share/dotnet:/usr/bin:/bin",
         "--env", "DOTNET_GCHeapHardLimit=0x8000000",
+        // Explicit --env forward, not a bare env::var() read inside
+        // run_worker: nsjail does NOT pass the parent's environment through
+        // by default — confirmed empirically (a stray first attempt at this
+        // that appended `--env SPIKE_SAMPLE=...` AFTER the `--` separator
+        // below instead of before it made nsjail try to execve("--env")
+        // as the target program itself and fail immediately; once moved
+        // before `--`, same place as the other --env flags, it works).
+        // Every other var run_worker needs from outside the jail
+        // (DOTNET_ROOT, PATH, DOTNET_GCHeapHardLimit above) is already
+        // forwarded this same explicit way; SPIKE_SAMPLE follows the
+        // identical pattern rather than relying on undocumented passthrough.
+        // MUST stay before "--": everything after that separator is nsjail's
+        // argv for the jailed program, not more nsjail flags.
+        "--env", &sample_env,
         // NOT --quiet — see the identical comment in java.rs::run(): we
         // need nsjail's own INFO-level "run time >= time limit" log line to
         // tell a timeout kill apart from a cgroup OOM kill (both produce
@@ -237,6 +388,24 @@ pub fn run_worker(dll_file: &Path) -> i32 {
         com::FATAL_ERROR = false;
         com::STEP_EVENTS_EMITTED = 0;
         com::STEP_CAPPED = false;
+        com::STEP_EVENTS_TOTAL = 0;
+        // Parity port of jdi/Debugger.java's `spike.sample` (see
+        // com::SAMPLE_N/STEP_EVENTS_TOTAL and cb_step_complete's doc
+        // comment). Same SPIKE_SAMPLE env var name Java already uses, for
+        // cross-language consistency (see RunOptions::sample_n's doc
+        // comment) — deliberately NOT renamed to something more
+        // production-sounding here; see tasks.md for that scope decision.
+        // Read directly from the environment (not threaded through as a fn
+        // arg) because run_worker is invoked from main.rs's dispatcher with
+        // just `--dll`, no RunOptions — same pattern SPIKE_TIME_LIMIT
+        // already uses a few lines below for the inner deadline. run_outer
+        // forwards it explicitly via `--env SPIKE_SAMPLE=...` (see that
+        // function), so it's guaranteed present here inside the jail.
+        com::SAMPLE_N = std::env::var("SPIKE_SAMPLE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1)
+            .max(1);
 
         // PDB is optional: `dotnet build -c Debug` produces one right next
         // to the dll (see ProcessSandboxRunner.compileCsharp on the API
@@ -389,6 +558,33 @@ pub fn run_worker(dll_file: &Path) -> i32 {
             return 1;
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Perf line, same shape/purpose as jdi/Debugger.java's final "[perf] ..."
+    // line — lets sampling be validated the same way on both languages
+    // (eventosTotais = every StepComplete callback, emitidos = only the
+    // ones that actually paid extraction+emission cost per SAMPLE_N).
+    unsafe {
+        // Copy out of the `static mut`s into locals before formatting (not
+        // `eprintln!("...", com::SAMPLE_N, ...)` directly) to avoid taking a
+        // live shared reference into a mutable static, which 2024-edition
+        // rustc warns on (`static_mut_refs`) — same non-issue in practice
+        // (single-threaded at this point, nothing else writes these once
+        // the debug session has ended) but no reason to introduce a new
+        // warning the rest of this file doesn't already have.
+        let elapsed_ms = RUN_START.map(|t0| t0.elapsed().as_millis() as u64).unwrap_or(0).max(1);
+        let sample_n = com::SAMPLE_N;
+        let total = com::STEP_EVENTS_TOTAL;
+        let emitted = com::STEP_EVENTS_EMITTED;
+        eprintln!(
+            "[perf] sampleN={} eventosTotais={} emitidos={} tempo={}ms taxaTotal={:.1} ev/s taxaEmitida={:.1} ev/s",
+            sample_n,
+            total,
+            emitted,
+            elapsed_ms,
+            total as f64 * 1000.0 / elapsed_ms as f64,
+            emitted as f64 * 1000.0 / elapsed_ms as f64,
+        );
     }
 
     // KNOWN GAP (documented in tasks.md, not fixed): `pid` here is the

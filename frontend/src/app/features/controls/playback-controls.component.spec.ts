@@ -3,12 +3,15 @@ import { describe, expect, it, vi } from 'vitest';
 import { PlaybackControlsComponent } from './playback-controls.component';
 
 describe('PlaybackControlsComponent', () => {
-  function create(overrides: Partial<Record<'hasStarted' | 'atEnd' | 'totalSteps', unknown>> = {}) {
+  function create(
+    overrides: Partial<Record<'hasStarted' | 'atEnd' | 'totalSteps' | 'isPlaying', unknown>> = {},
+  ) {
     TestBed.configureTestingModule({ imports: [PlaybackControlsComponent] });
     const fixture = TestBed.createComponent(PlaybackControlsComponent);
     fixture.componentRef.setInput('hasStarted', overrides['hasStarted'] ?? false);
     fixture.componentRef.setInput('atEnd', overrides['atEnd'] ?? false);
     fixture.componentRef.setInput('totalSteps', overrides['totalSteps'] ?? 5);
+    fixture.componentRef.setInput('isPlaying', overrides['isPlaying'] ?? false);
     fixture.detectChanges();
     return fixture;
   }
@@ -66,5 +69,34 @@ describe('PlaybackControlsComponent', () => {
   it('shows the total step count', () => {
     const fixture = create({ totalSteps: 42 });
     expect(fixture.nativeElement.textContent).toContain('42');
+  });
+
+  describe('play/pause toggle button', () => {
+    it('shows the "play" title/state when stopped', () => {
+      const fixture = create({ isPlaying: false, hasStarted: true });
+      expect(button(fixture, 'Reproduzir automaticamente')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('button[title="Pausar reprodução automática"]')).toBeNull();
+    });
+
+    it('shows the "pause" title/state when playing', () => {
+      const fixture = create({ isPlaying: true, hasStarted: true });
+      expect(button(fixture, 'Pausar reprodução automática')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('button[title="Reproduzir automaticamente"]')).toBeNull();
+    });
+
+    it('emits togglePlay when clicked', () => {
+      const fixture = create({ isPlaying: false });
+      const togglePlay = vi.fn();
+      fixture.componentInstance.togglePlay.subscribe(togglePlay);
+
+      button(fixture, 'Reproduzir automaticamente').click();
+
+      expect(togglePlay).toHaveBeenCalledTimes(1);
+    });
+
+    it('is disabled once at the end of the trace, like "next step"', () => {
+      const fixture = create({ atEnd: true, isPlaying: false });
+      expect(button(fixture, 'Reproduzir automaticamente').disabled).toBe(true);
+    });
   });
 });

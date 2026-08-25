@@ -32,6 +32,18 @@ pub static mut FATAL_ERROR: bool = false;
 // uninstrumented, exactly like the JDI side.
 pub static mut STEP_EVENTS_EMITTED: u32 = 0;
 pub static mut STEP_CAPPED: bool = false;
+// Sampling knob (parity port of jdi/Debugger.java's `spike.sample` /
+// eventCount): counts EVERY StepComplete callback (not just the emitted
+// ones — that's STEP_EVENTS_EMITTED above, a different, related counter),
+// and only the callbacks where `STEP_EVENTS_TOTAL % SAMPLE_N == 0` pay the
+// expensive locals/call-stack extraction + STEP_SINK emission cost. The
+// stepper is still re-armed (create_stepper/step_into) on every single
+// callback regardless of sampling — same semantics as Java, where sampling
+// only skips emitStepEvent(), never the underlying StepRequest/resume
+// protocol. Set once per run from csharp::run_worker (parsed from the
+// SPIKE_SAMPLE env var, same name Java already uses — see csharp.rs).
+pub static mut STEP_EVENTS_TOTAL: u32 = 0;
+pub static mut SAMPLE_N: u32 = 1;
 // Same indirection reason as STEP_SINK/ERROR_SINK above (this file is
 // shared with the legacy icordebug-spike binary, which has no `pdb` module
 // to call directly) — csharp::run_worker sets this to a plain `fn` (no
@@ -955,14 +967,27 @@ unsafe extern "C" fn cb_breakpoint(
 // legacy icordebug-spike binary, which has no `events` module.
 const STEP_EVENT_CAP: u32 = 5000;
 
-/// Cada StepComplete inspeciona o frame atual e emite UM evento de step.
-/// Ao atingir o cap de 5.000 eventos emitidos (`STEP_EVENT_CAP`, mesma
-/// decisão de escopo do lado Java — ver jdi/Debugger.java), para de armar
-/// um novo stepper e deixa o programa terminar sozinho, sem overhead de
-/// instrumentação — emite `step_limit_exceeded` uma única vez nesse
-/// momento. Se a inspeção falhar (ex: sem frame gerenciado ativo, perto do
-/// fim da execução), não emite nada nesse passo mas continua avançando de
-/// qualquer forma.
+/// Cada StepComplete inspeciona o frame atual e (sujeito a amostragem, ver
+/// abaixo) emite UM evento de step. Ao atingir o cap de 5.000 eventos
+/// EMITIDOS (`STEP_EVENT_CAP`, mesma decisão de escopo do lado Java — ver
+/// jdi/Debugger.java), para de armar um novo stepper e deixa o programa
+/// terminar sozinho, sem overhead de instrumentação — emite
+/// `step_limit_exceeded` uma única vez nesse momento. Se a inspeção falhar
+/// (ex: sem frame gerenciado ativo, perto do fim da execução), não emite
+/// nada nesse passo mas continua avançando de qualquer forma.
+///
+/// Sampling (port of jdi/Debugger.java's `spike.sample`/eventCount, see
+/// SAMPLE_N/STEP_EVENTS_TOTAL above): STEP_EVENTS_TOTAL counts every single
+/// StepComplete callback, cheaply, before any inspection. The expensive
+/// extraction (get_active_frame/extract_locals/get_call_stack_names) plus
+/// the STEP_SINK call only runs when `STEP_EVENTS_TOTAL % SAMPLE_N == 0` —
+/// on the other N-1 out of N callbacks this function does none of that
+/// work. This is purely about which steps get INSPECTED; it never changes
+/// which steps get STEPPED — create_stepper/step_into below still runs on
+/// every callback (until STEP_CAPPED), so the debuggee's actual control
+/// flow and the JDWP-equivalent ICorDebug round-trip cost are unaffected by
+/// SAMPLE_N, exactly mirroring Java's semantics (see java.rs/Debugger.java
+/// comments on eventCount vs emittedCount).
 unsafe extern "C" fn cb_step_complete(
     _this: *mut c_void,
     app_domain: *mut c_void,
@@ -971,23 +996,26 @@ unsafe extern "C" fn cb_step_complete(
     _reason: i32,
 ) -> HResult {
     if !STEP_CAPPED {
-        if let Ok(frame) = get_active_frame(thread) {
-            if let Ok(il_frame) = query_interface(frame, &IID_ICORDEBUG_IL_FRAME) {
-                let offset = get_il_offset(il_frame).unwrap_or(0);
-                let line = offset as i64;
-                let stack = get_call_stack_names(il_frame);
-                let method_token = get_function(il_frame)
-                    .and_then(|func| get_function_token(func))
-                    .unwrap_or(0);
-                let locals = extract_locals(il_frame, method_token, offset);
-                if let Some(sink) = STEP_SINK {
-                    sink(line, locals, stack);
-                }
-                STEP_EVENTS_EMITTED += 1;
-                if STEP_EVENTS_EMITTED >= STEP_EVENT_CAP {
-                    STEP_CAPPED = true;
-                    if let Some(sink) = LIMIT_SINK {
-                        sink();
+        STEP_EVENTS_TOTAL += 1;
+        if STEP_EVENTS_TOTAL % SAMPLE_N.max(1) == 0 {
+            if let Ok(frame) = get_active_frame(thread) {
+                if let Ok(il_frame) = query_interface(frame, &IID_ICORDEBUG_IL_FRAME) {
+                    let offset = get_il_offset(il_frame).unwrap_or(0);
+                    let line = offset as i64;
+                    let stack = get_call_stack_names(il_frame);
+                    let method_token = get_function(il_frame)
+                        .and_then(|func| get_function_token(func))
+                        .unwrap_or(0);
+                    let locals = extract_locals(il_frame, method_token, offset);
+                    if let Some(sink) = STEP_SINK {
+                        sink(line, locals, stack);
+                    }
+                    STEP_EVENTS_EMITTED += 1;
+                    if STEP_EVENTS_EMITTED >= STEP_EVENT_CAP {
+                        STEP_CAPPED = true;
+                        if let Some(sink) = LIMIT_SINK {
+                            sink();
+                        }
                     }
                 }
             }
@@ -1117,13 +1145,36 @@ unsafe extern "C" fn cb_break(_this: *mut c_void, _ad: *mut c_void, _thread: *mu
     S_OK
 }
 
+/// Real (not just theoretical) bug fixed here: this used to just `S_OK`
+/// without ever calling `Continue()` — every OTHER callback in this file
+/// resumes the app domain/process before returning, but this one silently
+/// didn't. Confirmed via a real uncaught IndexOutOfRangeException that this
+/// callback DOES fire in practice (`unhandled=0`, the first-chance
+/// notification) — so the no-op was a live bug, not dead code: any program
+/// that raises ANY exception (caught or not — first-chance fires for both)
+/// would have left the debuggee suspended here forever. Fixed by calling
+/// `Continue()` like every other callback does.
+///
+/// Investigated (see tasks.md) but did NOT resolve the broader open issue:
+/// the follow-up `unhandled=1` notification ICorDebug's docs describe for a
+/// truly-unhandled exception never arrives — the debuggee just runs to the
+/// outer nsjail --time_limit instead, with the stepper apparently stuck
+/// somewhere in the CLR's internal exception-unwind code (same *symptom* —
+/// stepper progress stalling on a CLR-internal transition — as the
+/// already-documented `Thread.Start()`/`StartCore` stall, possibly a
+/// related root cause, not confirmed). Tried explicitly deactivating the
+/// most-recently-armed `ICorDebugStepper` here before continuing, on the
+/// hypothesis that an active stepper was itself blocking the unwind from
+/// completing — `Deactivate()` returned success but did not change the
+/// outcome, ruling that hypothesis out empirically rather than by
+/// assumption. Left as an open item, not force-fixed.
 unsafe extern "C" fn cb_exception(
     _this: *mut c_void,
-    _ad: *mut c_void,
+    ad: *mut c_void,
     _thread: *mut c_void,
     _unhandled: i32,
 ) -> HResult {
-    S_OK
+    continue_(ad)
 }
 
 unsafe extern "C" fn cb_eval_complete(

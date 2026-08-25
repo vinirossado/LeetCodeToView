@@ -123,6 +123,7 @@ export class App {
   readonly outputSoFar = this.trace.outputSoFar;
   readonly breakpoints = this.trace.breakpoints;
   readonly landedViaBreakpoint = this.trace.landedViaBreakpoint;
+  readonly isPlaying = this.trace.isPlaying;
 
   readonly currentLine = computed(() => this.currentStep()?.line ?? null);
   readonly currentStack = computed(() => this.currentStep()?.stack ?? null);
@@ -192,6 +193,10 @@ export class App {
 
   runToPreviousBreakpoint(): void {
     this.trace.runToPreviousBreakpoint();
+  }
+
+  togglePlay(): void {
+    this.trace.togglePlay();
   }
 
   private runAnalysis(language: Language, code: string): void {

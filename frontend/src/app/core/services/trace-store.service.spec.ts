@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExecutionEvent, StepEvent } from '../models/execution-event.model';
 import { TraceStoreService } from './trace-store.service';
 
@@ -278,6 +278,129 @@ describe('TraceStoreService', () => {
       expect(store.totalSteps()).toBe(0);
       expect(store.hasStarted()).toBe(false);
       expect(store.breakpoints().has(1)).toBe(true);
+    });
+  });
+
+  describe('autoplay (play/pause on a fixed-interval timer, see class doc)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      store.ingestEvent(step(1));
+      store.ingestEvent(step(2));
+      store.ingestEvent(step(3));
+      store.jumpToStart();
+    });
+
+    afterEach(() => {
+      // Belt-and-suspenders: make sure no leftover interval keeps firing
+      // into the next test's fake-timer queue.
+      store.pause();
+      vi.useRealTimers();
+    });
+
+    it('steps forward automatically on each tick while playing', () => {
+      store.play();
+      expect(store.isPlaying()).toBe(true);
+
+      vi.advanceTimersByTime(700);
+      expect(store.currentStep()?.line).toBe(1);
+
+      vi.advanceTimersByTime(700);
+      expect(store.currentStep()?.line).toBe(2);
+    });
+
+    it('pause() stops the timer mid-playback', () => {
+      store.play();
+      vi.advanceTimersByTime(700);
+      expect(store.currentStep()?.line).toBe(1);
+
+      store.pause();
+      expect(store.isPlaying()).toBe(false);
+
+      vi.advanceTimersByTime(2000);
+      // No further ticks should have landed once paused.
+      expect(store.currentStep()?.line).toBe(1);
+    });
+
+    it('togglePlay() flips between playing and paused', () => {
+      store.togglePlay();
+      expect(store.isPlaying()).toBe(true);
+      store.togglePlay();
+      expect(store.isPlaying()).toBe(false);
+    });
+
+    it('stops cleanly at the end of the trace instead of erroring or ticking past it', () => {
+      store.play();
+      vi.advanceTimersByTime(700 * 10); // far more ticks than there are steps
+
+      expect(store.atEnd()).toBe(true);
+      expect(store.isPlaying()).toBe(false);
+      expect(store.currentStep()?.line).toBe(3);
+    });
+
+    it('does not start playing when already at the end', () => {
+      store.jumpToEnd();
+      store.play();
+      expect(store.isPlaying()).toBe(false);
+    });
+
+    it('stops automatically upon landing on a breakpointed line, like a debugger run/continue', () => {
+      store.toggleBreakpoint(2);
+      store.play();
+
+      vi.advanceTimersByTime(700); // -> line 1
+      expect(store.isPlaying()).toBe(true);
+      vi.advanceTimersByTime(700); // -> line 2, hits the breakpoint
+
+      expect(store.currentStep()?.line).toBe(2);
+      expect(store.isPlaying()).toBe(false);
+
+      // Further ticks must not fire once stopped at the breakpoint.
+      vi.advanceTimersByTime(2000);
+      expect(store.currentStep()?.line).toBe(2);
+    });
+
+    it('manual navigation (stepBack) interrupts autoplay', () => {
+      store.play();
+      vi.advanceTimersByTime(700);
+      store.stepBack();
+
+      expect(store.isPlaying()).toBe(false);
+      vi.advanceTimersByTime(2000);
+      // No further autoplay ticks after the manual step.
+      expect(store.hasStarted()).toBe(false);
+    });
+
+    it('manual navigation (jumpToStart) interrupts autoplay', () => {
+      store.play();
+      vi.advanceTimersByTime(700);
+      store.jumpToStart();
+
+      expect(store.isPlaying()).toBe(false);
+    });
+
+    it('manual navigation (jumpToEnd) interrupts autoplay', () => {
+      store.play();
+      store.jumpToEnd();
+
+      expect(store.isPlaying()).toBe(false);
+      expect(store.atEnd()).toBe(true);
+    });
+
+    it('manual navigation (runToNextBreakpoint) interrupts autoplay', () => {
+      store.toggleBreakpoint(3);
+      store.play();
+      store.runToNextBreakpoint();
+
+      expect(store.isPlaying()).toBe(false);
+      expect(store.currentStep()?.line).toBe(3);
+    });
+
+    it('play() is a no-op while already playing (does not stack multiple timers)', () => {
+      store.play();
+      store.play();
+      vi.advanceTimersByTime(700);
+      // If a second interval had been started, this would be on line 2 already.
+      expect(store.currentStep()?.line).toBe(1);
     });
   });
 });

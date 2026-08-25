@@ -27,6 +27,117 @@ use std::process::Command;
 
 use crate::events::{self, Event, RunOutcome};
 
+// Fase 2 hardening: minimal default-deny seccomp-bpf allowlist for the
+// jailed `java ... Debugger ...` process (JDI driver + target JVM launched
+// via LaunchingConnector -- both run inside this SAME jail, see the module
+// doc comment above). Kafel syntax (`ALLOW { syscall, ... } DEFAULT KILL`,
+// `//` line comments) confirmed empirically, not from memory: cloned
+// nsjail's own source (the same repo `sandbox/Dockerfile`/`Dockerfile.api`
+// build nsjail from) and its `kafel/` submodule, and cross-checked against
+// nsjail's own README ("Kafel policy syntax" section) and `kafel/samples/*.
+// policy`. `--seccomp_string`/`--seccomp_policy` confirmed via `nsjail
+// --help` inside the real image (not guessed) -- `-P`/`--seccomp_policy` is
+// a file path, `--seccomp_string` is this same syntax inline; inline is
+// used here (not a shipped file) to keep this the single source of truth
+// next to the other hardcoded nsjail flags in this file, same convention.
+//
+// The syscall set below is the UNION of `strace -f` runs of this exact
+// `java ... Debugger ...` command line (same args as the ones built below,
+// minus the nsjail wrapper -- javac itself runs OUTSIDE the jail, before
+// this policy is even in effect, see `run()` above) across EVERY snippet in
+// `test-snippets/` (loops, recursion/stack-overflow, multi-thread, memory-
+// heavy allocation, output flooding, filesystem/network escape attempts).
+// Categorized here (not just a bare list) so a future change to what kind
+// of Java program this sandbox supports has a map of WHY each group exists:
+const JAVA_SECCOMP_POLICY: &str = r#"ALLOW {
+    // Process/thread lifecycle. execve is required because the JDI driver
+    // (jdi/Debugger.java) launches the TARGET jvm as a real child process
+    // via LaunchingConnector -- confirmed in the strace as a second
+    // process, not a thread. clone covers both that fork and every
+    // JVM-internal thread (GC/JIT/compiler housekeeping threads, plus any
+    // user Thread -- see MultiThread.java).
+    execve, clone, exit, exit_group, wait4, kill,
+    set_tid_address, set_robust_list, rseq, prctl,
+    gettid, getpid, geteuid, getuid,
+    // futex: NOT optional -- every JVM thread (GC/JIT/compiler, plus any
+    // user Thread) synchronizes via futex, including a "single-threaded"
+    // program (the JVM itself is never actually single-threaded). ppoll is
+    // the JDWP socket wait-with-timeout. prlimit64 is the JVM reading its
+    // own rlimits (RLIMIT_NOFILE/RLIMIT_AS etc., the ones this same nsjail
+    // invocation sets) at startup to size internal pools.
+    futex, ppoll, prlimit64,
+
+    // Memory management: heap, thread stacks, JIT code cache, compressed
+    // class space, direct ByteBuffers (MaxDirectMemorySize) -- exercised by
+    // MemoryHog.java/BigCountLoop.java.
+    brk, mmap, munmap, mprotect, madvise,
+
+    // File I/O: reading class files (bootclasspath + /app/jdi-out + the
+    // user's own .java source dir) and the driver's own stdout/stderr.
+    // FilesystemEscape.java's read of /etc/shadow and write to /tmp use
+    // these same syscalls (openat/read/write) -- nsjail's chroot/mount
+    // setup, not seccomp, is what's supposed to gate what paths succeed,
+    // same layering choice as the network case below.
+    openat, read, write, close, pread64, lseek,
+    // newfstat, not `fstat`: the JVM genuinely DOES issue a raw fstat(2) on
+    // an already-open fd (syscall number 80 on aarch64's generic syscall
+    // ABI, confirmed by directly stracing this exact nsjail+seccomp
+    // invocation -- first cut of this policy used the bare `fstat` name,
+    // which kafel's parser rejected ("Undefined identifier `fstat`"), then
+    // ran WITHOUT that syscall and confirmed it really is needed: the
+    // target JVM got `+++ killed by SIGSYS +++` on `fstat(4, ...)` reading
+    // `.../lib/server/classes.jsa` (the CDS archive) with it missing.
+    // kafel's generated aarch64 table (kafel/src/syscalls/aarch64_syscalls.c)
+    // names this syscall `newfstat` (distinct from `newfstatat`, which
+    // takes a directory-relative path and is what most other fd-metadata
+    // calls compile down to on this architecture).
+    newfstat, newfstatat, statx, statfs, faccessat, readlinkat,
+    getdents64, getcwd, fchdir, mkdirat, unlinkat, ftruncate, flock,
+    dup3, ioctl, fcntl, pipe2,
+
+    // Sockets: the driver and target JVM talk JDWP over a loopback TCP
+    // socket (JDI's CommandLineLaunch connector) -- required for the
+    // debugger itself to work, not just user code. Also what
+    // NetworkEscape.java's own connection attempt needs to even try:
+    // letting that attempt fail at the network-NAMESPACE level (no
+    // interfaces reachable, already validated to surface as a normal
+    // caught IOException) is the correct isolation layer for user network
+    // I/O -- NOT this seccomp policy, which would otherwise turn a
+    // catchable exception into an uncatchable SIGSYS crash instead, a
+    // strictly worse and inconsistent-with-Java outcome.
+    socket, connect, bind, listen, accept,
+    getsockname, getsockopt, setsockopt, shutdown, socketpair,
+    sendto, recvfrom, recvmsg,
+
+    // Time/scheduling/misc the JVM needs at startup and during normal
+    // operation (System.nanoTime, GC pacing, thread scheduling hints,
+    // /dev/urandom-backed SecureRandom seeding).
+    clock_gettime, clock_getres, clock_nanosleep,
+    sched_getaffinity, sched_yield, getrusage, sysinfo, getrandom,
+    // newuname, not `uname` -- kafel's aarch64 syscall table names this
+    // syscall `newuname` (matching the kernel's internal `sys_newuname`,
+    // what libc's `uname()` actually maps to on this architecture); a bare
+    // `uname` fails the same "Undefined identifier" compile check as the
+    // `fstat` case above. Confirmed by reading the same generated table.
+    newuname,
+
+    // Signals: the JVM installs a SIGSEGV handler at startup as part of its
+    // guard-page-based StackOverflowError detection (DeepRecursion.java/
+    // StackOverflowNoCatch.java) and handles a few others (SIGTERM etc.)
+    // for shutdown hooks.
+    rt_sigaction, rt_sigprocmask, rt_sigreturn, restart_syscall
+} DEFAULT KILL"#;
+
+// Architecture caveat, same category as the arm64-only netcoredbg pin
+// documented in csharp.rs: the syscall set above was derived on linux/arm64
+// (Apple Silicon Docker Desktop, this project's dev environment) via a real
+// `strace -f`, not guessed. aarch64 Linux only has the "modern" syscall
+// forms (openat/faccessat/newfstatat/clone -- no legacy open/access/stat/
+// fork), so an amd64 host's glibc *could* pick a different legacy syscall
+// for the same libc call in some cases. Not verified on amd64 yet -- if
+// this is ever deployed there, re-derive (or re-validate) this list on that
+// architecture the same way, don't assume it transfers unchanged.
+
 pub struct RunOptions {
     pub time_limit_secs: String,
     pub sample_n: String,
@@ -124,6 +235,10 @@ pub fn run(java_file: &Path, opts: &RunOptions) -> std::process::ExitStatus {
         // those even though it's already running as real root.
         "--uid_mapping", "65534:65534:1",
         "--gid_mapping", "65534:65534:1",
+        // Fase 2 hardening: minimal default-deny seccomp-bpf allowlist --
+        // see JAVA_SECCOMP_POLICY's doc comment above for how this syscall
+        // set was derived and validated.
+        "--seccomp_string", JAVA_SECCOMP_POLICY,
         "--chroot", "/",
         "--cwd", src_dir.to_str().unwrap(),
         // NOT --quiet: nsjail's own INFO-level log line ("run time >= time

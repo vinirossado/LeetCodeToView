@@ -1,4 +1,4 @@
-import { Injectable, computed, signal } from '@angular/core';
+import { Injectable, OnDestroy, computed, signal } from '@angular/core';
 import {
   isStdoutEvent,
   isStepEvent,
@@ -37,9 +37,27 @@ import type { ExecutionStatus } from '../models/execution.model';
  * actually paused execution, even though the sandbox already ran the whole
  * program start-to-finish and this is just client-side replay catching up
  * to a marked line as events stream in.
+ *
+ * Autoplay: since the whole trace is already buffered client-side,
+ * "playing" it back is nothing more than calling stepForward() on a
+ * `setInterval` (see `play`/`pause`/`autoplayTick` below) — no server
+ * involvement, same as every other navigation method in this class. Three
+ * behavioral decisions were made here (see tasks.md for the write-up):
+ *   1. Fixed speed only (AUTOPLAY_INTERVAL_MS), no speed selector yet.
+ *   2. Autoplay stops automatically the moment it lands on a breakpointed
+ *      line, mirroring what a real debugger's "run" does at a breakpoint —
+ *      chosen over "ignore breakpoints and just march through" because this
+ *      app already invests in a debugger-like breakpoint feel elsewhere
+ *      (landedViaBreakpoint / stoppedAtBreakpoint styling, runToNextBreakpoint).
+ *   3. Any manual navigation call (stepBack/stepForward/goToStep/jumpToStart/
+ *      jumpToEnd/runToNextBreakpoint/runToPreviousBreakpoint) pauses autoplay first — "touching a control takes
+ *      the wheel back" is the least surprising behavior. This is done by
+ *      having each of those *public* methods call `pause()` before doing
+ *      its own thing; `autoplayTick` itself calls the private `landOn`
+ *      directly so it doesn't pause itself on every tick.
  */
 @Injectable({ providedIn: 'root' })
-export class TraceStoreService {
+export class TraceStoreService implements OnDestroy {
   private readonly eventsSig = signal<ExecutionEvent[]>([]);
   private readonly cursorSig = signal<number>(-1);
   private readonly followLiveSig = signal<boolean>(true);
@@ -47,12 +65,18 @@ export class TraceStoreService {
   private readonly statusSig = signal<ExecutionStatus>('pending');
   /** True only when the cursor's current position was reached by actually matching a breakpoint (see `landOn`). */
   private readonly landedViaBreakpointSig = signal<boolean>(false);
+  private readonly isPlayingSig = signal<boolean>(false);
+  /** Handle for the autoplay `setInterval`, or null while not playing. */
+  private playTimerId: ReturnType<typeof setInterval> | null = null;
+  /** Fixed autoplay speed — not user-configurable yet, see class doc / tasks.md. */
+  private static readonly AUTOPLAY_INTERVAL_MS = 700;
 
   readonly events = this.eventsSig.asReadonly();
   readonly status = this.statusSig.asReadonly();
   readonly breakpoints = this.breakpointsSig.asReadonly();
   readonly isFollowingLive = this.followLiveSig.asReadonly();
   readonly landedViaBreakpoint = this.landedViaBreakpointSig.asReadonly();
+  readonly isPlaying = this.isPlayingSig.asReadonly();
 
   readonly steps = computed<StepEvent[]>(() => this.eventsSig().filter(isStepEvent));
   readonly totalSteps = computed(() => this.steps().length);
@@ -138,6 +162,7 @@ export class TraceStoreService {
 
   /** Clears the trace and cursor for a new run. Breakpoints are kept — they're a debugging aid across re-runs. */
   reset(): void {
+    this.pause();
     this.eventsSig.set([]);
     this.cursorSig.set(-1);
     this.followLiveSig.set(true);
@@ -151,26 +176,87 @@ export class TraceStoreService {
    * (cursor === totalSteps) and the last real step index both display the
    * same step (by design, see class doc), so stepping back from pseudo-end
    * must skip past that alias to actually change what's shown.
+   *
+   * Each of these public navigation methods pauses autoplay first (see
+   * class doc, decision 3) — manual navigation always wins.
    */
   stepForward(): void {
+    this.pause();
     this.landOn(this.currentStepIndex() + 1);
   }
 
   stepBack(): void {
+    this.pause();
     this.landOn(this.currentStepIndex() - 1);
   }
 
   /** Jump directly to a 0-based step index (clamped to the valid range). */
   goToStep(index: number): void {
+    this.pause();
     this.landOn(index);
   }
 
   jumpToStart(): void {
+    this.pause();
     this.landOn(-1);
   }
 
   jumpToEnd(): void {
+    this.pause();
     this.landOn(this.totalSteps());
+  }
+
+  /**
+   * Starts autoplay: steps forward once every AUTOPLAY_INTERVAL_MS until it
+   * either reaches the end of the trace or lands on a breakpointed line
+   * (see class doc, decisions 1-2). No-op if already playing or if there's
+   * nothing left to step into.
+   */
+  play(): void {
+    if (this.isPlayingSig() || this.atEnd() || this.totalSteps() === 0) return;
+    this.isPlayingSig.set(true);
+    this.playTimerId = setInterval(() => this.autoplayTick(), TraceStoreService.AUTOPLAY_INTERVAL_MS);
+  }
+
+  /** Stops autoplay (idempotent — safe to call whether or not it's currently playing). */
+  pause(): void {
+    this.isPlayingSig.set(false);
+    if (this.playTimerId !== null) {
+      clearInterval(this.playTimerId);
+      this.playTimerId = null;
+    }
+  }
+
+  togglePlay(): void {
+    if (this.isPlayingSig()) {
+      this.pause();
+    } else {
+      this.play();
+    }
+  }
+
+  /**
+   * One autoplay tick. Uses `landOn` directly (not `stepForward`) so it
+   * doesn't pause itself on every step — see class doc decision 3.
+   */
+  private autoplayTick(): void {
+    const nextIndex = this.currentStepIndex() + 1;
+    if (nextIndex >= this.totalSteps()) {
+      // Nothing left to step into — stop cleanly instead of firing
+      // uselessly (or erroring) past the end of the trace.
+      this.pause();
+      this.landOn(this.totalSteps());
+      return;
+    }
+    const hitBreakpoint = this.breakpointsSig().has(this.steps()[nextIndex].line);
+    this.landOn(nextIndex, hitBreakpoint);
+    if (hitBreakpoint) {
+      this.pause();
+    }
+  }
+
+  ngOnDestroy(): void {
+    this.pause();
   }
 
   toggleBreakpoint(line: number): void {
@@ -194,6 +280,7 @@ export class TraceStoreService {
    * an actual match marks the landing as a breakpoint hit.
    */
   runToNextBreakpoint(): void {
+    this.pause();
     const steps = this.steps();
     const bps = this.breakpointsSig();
     for (let i = this.cursorSig() + 1; i < steps.length; i++) {
@@ -207,6 +294,7 @@ export class TraceStoreService {
 
   /** Rewinds to the previous step (before the current position) whose line has a breakpoint, or to the start. */
   runToPreviousBreakpoint(): void {
+    this.pause();
     const steps = this.steps();
     const bps = this.breakpointsSig();
     for (let i = this.cursorSig() - 1; i >= 0; i--) {

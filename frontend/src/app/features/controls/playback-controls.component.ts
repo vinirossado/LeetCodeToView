@@ -17,6 +17,8 @@ export class PlaybackControlsComponent {
   readonly hasStarted = input<boolean>(false);
   readonly atEnd = input<boolean>(false);
   readonly totalSteps = input<number>(0);
+  /** Whether autoplay is currently running — flips the play/pause button's icon and label. */
+  readonly isPlaying = input<boolean>(false);
 
   readonly stepForward = output<void>();
   readonly stepBack = output<void>();
@@ -24,4 +26,6 @@ export class PlaybackControlsComponent {
   readonly jumpToEnd = output<void>();
   readonly runToNextBreakpoint = output<void>();
   readonly runToPreviousBreakpoint = output<void>();
+  /** Emitted when the play/pause button is clicked — the parent/service owns the actual start/stop logic. */
+  readonly togglePlay = output<void>();
 }

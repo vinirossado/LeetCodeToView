@@ -50,12 +50,14 @@
       [hasStarted]="hasStarted()"
       [atEnd]="atEnd()"
       [totalSteps]="totalSteps()"
+      [isPlaying]="isPlaying()"
       (stepForward)="stepForward()"
       (stepBack)="stepBack()"
       (jumpToStart)="jumpToStart()"
       (jumpToEnd)="jumpToEnd()"
       (runToNextBreakpoint)="runToNextBreakpoint()"
       (runToPreviousBreakpoint)="runToPreviousBreakpoint()"
+      (togglePlay)="togglePlay()"
     />
 
     <app-status-banner [terminalEvent]="terminalEvent()" />

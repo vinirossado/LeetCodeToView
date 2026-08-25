@@ -8,6 +8,25 @@
   </button>
   <button
     type="button"
+    [title]="isPlaying() ? 'Pausar reprodução automática' : 'Reproduzir automaticamente'"
+    (click)="togglePlay.emit()"
+    [disabled]="atEnd()"
+  >
+    @if (isPlaying()) {
+      <!-- pause: two vertical bars -->
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+        <rect x="4" y="3" width="3" height="10" />
+        <rect x="9" y="3" width="3" height="10" />
+      </svg>
+    } @else {
+      <!-- play: single large triangle -->
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+        <path d="M4 2.5v11l10-5.5z" />
+      </svg>
+    }
+  </button>
+  <button
+    type="button"
     title="Breakpoint anterior"
     (click)="runToPreviousBreakpoint.emit()"
     [disabled]="!hasStarted()"
