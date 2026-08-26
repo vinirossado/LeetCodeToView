@@ -1,22 +1,21 @@
-# Pi variant of .ci/leetcodeview-api.service — same privilege set (nsjail's
-# --cgroupns=host / --security-opt requirements don't change with the host,
-# see that file's own header comment for the full validated reasoning), but:
-#   - no registry pull: builds/tags the image LOCALLY on the Pi (see
-#     .ci/deploy-pi.sh) as `leetcodeview:latest`, no `pizito:5001/` prefix —
-#     the Pi is a local test environment, not pizito (the real VPS); nothing
-#     has been pushed to pizito's registry from here.
-#   - `--network leetcodeview-net`, a plain user-defined BRIDGE network
-#     (`docker network create leetcodeview-net`), not the `proxy_net`
-#     Swarm overlay — the Pi's frontend is ALSO a plain container (see
-#     .ci/leetcodeview-fe.pi.service), not a Swarm service, so there is no
-#     Swarm on this host at all (see .ci/readme.md's "Pi" section for why).
-#   - `-p 8080:8080` published directly (no reverse proxy/Swarm ingress
-#     doing that on the Pi).
-#   - no EnvironmentFile — the Pi doesn't have pizito's
-#     /mnt/ssd/@docker/leetcodeview/.env; add one here if the Pi ever needs
-#     its own secrets/config beyond DOTNET_GCHeapHardLimit below.
+# systemd unit for the `api` container (Quarkus API + sandbox-runner +
+# static-analyzer, one combined image — see .ci/Dockerfile). Plain
+# `docker run`, not a Swarm service — nsjail (the process this container's
+# own Quarkus API shells out to per execution) needs `--cgroupns=host` and
+# `--security-opt systempaths=unconfined`/`seccomp=unconfined` to actually
+# isolate untrusted code on a real Linux host, and Docker Swarm has no way
+# to grant either (confirmed empirically: `cgroup: host` is rejected at
+# stack-file schema validation, `security_opt` is silently ignored) — see
+# spec.md's "Isolamento de execução: nsjail" for the full validated finding.
+# There is no Swarm anywhere in this deploy (see .ci/readme.md) — the
+# frontend (.ci/leetcodeview-fe.service) is a plain container too, joined
+# to the same plain bridge network (`leetcodeview-net`) so it can reach
+# this one by its `--name`.
+#
+# Image is built LOCALLY (see deploy.sh), not pulled from a registry —
+# there's no registry in this deploy.
 [Unit]
-Description=code2complexity API (Pi, local test — no Swarm, no registry, see this file's own header comment)
+Description=code2complexity API
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target

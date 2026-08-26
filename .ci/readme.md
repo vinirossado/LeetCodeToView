@@ -1,69 +1,40 @@
 # Deploy
 
+Sem Swarm, sem registry — os dois containers (`api` e `frontend`) rodam
+como `docker run` comuns, gerenciados por systemd, numa rede bridge
+comum. Imagens são buildadas localmente no próprio host de deploy.
+
 ## api (Quarkus + sandbox-runner + static-analyzer)
 
-Runs OUTSIDE Docker Swarm's service model — a plain, systemd-managed
-`docker run` container. Not the original design; changed after a real,
-validated finding (see `.ci/leetcodeview-api.service`'s own header
-comment, `tasks.md`, and `spec.md`'s "Isolamento de execução: nsjail"):
-Swarm has no way to grant `cgroupns=host`/`security_opt` overrides, both
-genuinely required for `nsjail` to isolate untrusted code on a real Linux
-host — confirmed against a real Swarm cluster and a real (non-VM) Linux
-kernel, not assumed.
-
-One-time setup on the VPS:
-
-```
-ruby scripts/publish.rb
-docker network create -d overlay --attachable proxy_net   # if it doesn't exist yet — MUST be --attachable
-sudo cp .ci/leetcodeview-api.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now leetcodeview-api.service
-```
-
-Every deploy after that:
-
-```
-./deploy.sh
-```
-
-(pulls the latest image, `systemctl restart`s the unit, waits for the
-real `/health` endpoint — see that file.)
+`api` precisa de `cgroupns=host`/`security_opt` overrides pro `nsjail`
+isolar código não confiável de verdade — Docker Swarm não tem como
+conceder isso (decisão fechada, ver `spec.md`'s "Isolamento de execução:
+nsjail" e o próprio `.ci/leetcodeview-api.service`), por isso roda fora
+de qualquer modelo de serviço, como um container comum.
 
 ## frontend
 
-Still a normal Swarm service — it doesn't need any of the privileges
-above.
+Angular build servido por nginx, fazendo proxy de `/executions` e
+`/analysis` pro container `api` pelo nome (`leetcodeview-api`) na mesma
+rede bridge — ver `.ci/nginx.frontend.conf`. Também um container comum,
+sem privilégios especiais.
+
+## Setup (uma vez, no host de deploy)
 
 ```
-ruby scripts/publish-fe.rb
-docker stack deploy -c .ci/stack-fe.yml leetcodeview-fe
-```
-
-## Pi (ambiente de teste local, sem Swarm)
-
-O Pi (`ssh alexcastrodev@pi`) é usado só pra validação local, não é o VPS
-de produção (pizito) — não tem imagem nenhuma publicada no registry
-`pizito:5001` acessível de lá, e não faz sentido pagar o custo de Swarm
-(2 réplicas, rolling update) num ambiente de teste single-instance. Os
-dois serviços rodam como containers `docker run` comuns gerenciados por
-systemd, numa rede bridge simples — nenhum Swarm envolvido em nada.
-
-One-time setup:
-
-```
-docker network create leetcodeview-net   # bridge comum, NÃO overlay
-sudo cp .ci/leetcodeview-api.pi.service .ci/leetcodeview-fe.pi.service /etc/systemd/system/
+docker network create leetcodeview-net   # bridge comum
+sudo cp .ci/leetcodeview-api.service .ci/leetcodeview-fe.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable leetcodeview-api.pi.service leetcodeview-fe.pi.service
+sudo systemctl enable leetcodeview-api.service leetcodeview-fe.service
 ```
 
-Deploy (builda as duas imagens localmente, sem registry — ver
-`.ci/deploy-pi.sh`):
+## Deploy
 
 ```
 git pull
-./.ci/deploy-pi.sh
+./deploy.sh
 ```
 
-api fica em `localhost:8080`, frontend em `localhost:8081`.
+Builda as duas imagens localmente, reinicia os dois serviços e espera o
+health check real de cada um. `api` fica em `localhost:8080`, `frontend`
+em `localhost:8081`.
