@@ -39,3 +39,31 @@ above.
 ruby scripts/publish-fe.rb
 docker stack deploy -c .ci/stack-fe.yml leetcodeview-fe
 ```
+
+## Pi (ambiente de teste local, sem Swarm)
+
+O Pi (`ssh alexcastrodev@pi`) é usado só pra validação local, não é o VPS
+de produção (pizito) — não tem imagem nenhuma publicada no registry
+`pizito:5001` acessível de lá, e não faz sentido pagar o custo de Swarm
+(2 réplicas, rolling update) num ambiente de teste single-instance. Os
+dois serviços rodam como containers `docker run` comuns gerenciados por
+systemd, numa rede bridge simples — nenhum Swarm envolvido em nada.
+
+One-time setup:
+
+```
+docker network create leetcodeview-net   # bridge comum, NÃO overlay
+sudo cp .ci/leetcodeview-api.pi.service .ci/leetcodeview-fe.pi.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable leetcodeview-api.pi.service leetcodeview-fe.pi.service
+```
+
+Deploy (builda as duas imagens localmente, sem registry — ver
+`.ci/deploy-pi.sh`):
+
+```
+git pull
+./.ci/deploy-pi.sh
+```
+
+api fica em `localhost:8080`, frontend em `localhost:8081`.

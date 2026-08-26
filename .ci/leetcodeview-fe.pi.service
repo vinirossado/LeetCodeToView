@@ -1,0 +1,37 @@
+# Pi variant of the frontend deploy — plain systemd-managed `docker run`,
+# NOT a Swarm service (see .ci/stack-fe.yml for the VPS/pizito version,
+# which uses Swarm for 2 replicas + rolling zero-downtime updates; the Pi
+# is a single-instance local test environment, that HA machinery is real
+# complexity with no payoff here — see .ci/readme.md's "Pi" section).
+# No elevated privileges needed (this is just nginx serving a static build
+# and reverse-proxying to `leetcodeview-api`), joins the same
+# `leetcodeview-net` plain bridge network as the api container (see
+# .ci/leetcodeview-api.pi.service), image built locally by
+# .ci/deploy-pi.sh (`leetcodeview-fe:latest`, from
+# .ci/Dockerfile.frontend.pi / .ci/nginx.frontend.pi.conf — the Swarm
+# cross-stack DNS name `leetcodeview_api` used by the VPS's
+# .ci/nginx.frontend.conf does not resolve here, plain bridge DNS uses the
+# container's own `--name` instead).
+[Unit]
+Description=code2complexity frontend (Pi, local test — no Swarm, see this file's own header comment)
+After=docker.service network-online.target leetcodeview-api.pi.service
+Requires=docker.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+
+ExecStartPre=-/usr/bin/docker rm -f leetcodeview-fe
+
+ExecStart=/usr/bin/docker run --rm --name leetcodeview-fe \
+  --network leetcodeview-net \
+  -p 8081:80 \
+  leetcodeview-fe:latest
+
+ExecStop=/usr/bin/docker stop -t 15 leetcodeview-fe
+
+[Install]
+WantedBy=multi-user.target
