@@ -1,52 +1,22 @@
-# systemd unit for the `api` container (Quarkus API + sandbox-runner +
-# static-analyzer, one combined image — see .ci/Dockerfile). Runs as a
-# PLAIN `docker run` container, NOT a Swarm service — deliberate, not an
-# oversight. See tasks.md and spec.md's "Isolamento de execução: nsjail"
-# for the full validated finding this replaces:
-#
-# Docker Swarm's task/service model has NO way to grant a container
-# `--cgroupns=host` or `--security-opt` overrides — confirmed empirically
-# against a real Swarm cluster (rejected at stack-file schema validation
-# for `cgroup: host`; silently ignored for `security_opt`; absent from
-# both the `docker service create` CLI and the raw Swarm Engine API's
-# `ContainerSpec.Privileges` struct, at every layer checked). nsjail (the
-# process this container's own Quarkus API shells out to per execution)
-# needs BOTH to actually isolate untrusted code on a real Linux host:
-# `cgroupns=host` for cgroupv2 delegation (moving a process into a newly
-# created cgroup fails with a plain cgroup bind mount alone — confirmed
-# on a real Debian arm64 host, not just inferred), and
-# `security_opt: [systempaths=unconfined, seccomp=unconfined]` for
-# nsjail's own procfs mount + `pivot_root` (Docker's default seccomp
-# profile blocks `pivot_root` unconditionally for non-privileged
-# containers, no capability closes that gap). Validated end-to-end with
-# real POST /executions for Java, C#, and Ruby, plus a filesystem-escape
-# pentest snippet confirming the sandbox boundary itself still holds.
-#
-# Only THIS service needs to live outside Swarm — it's the one holding
-# elevated host privileges to run nsjail. Anything without that
-# requirement (e.g. the frontend, see .ci/stack-fe.yml) stays a normal
-# Swarm service; Swarm mode itself remains active on the host for that.
-# This container joins the SAME `proxy_net` overlay network as those
-# Swarm services (confirmed a Swarm service task can reach a plain,
-# non-service container by name on an `attachable` overlay network,
-# validated on a real cluster) — so a reverse proxy running as a Swarm
-# service can still route to this container exactly as if it were one
-# itself.
-#
-# Setup (one-time, on the VPS):
-#   docker network create -d overlay --attachable proxy_net   # if it
-#     doesn't already exist — MUST be --attachable, a plain `overlay`
-#     network (Swarm's default when a stack file creates one) only
-#     allows Swarm-managed service tasks to join, not plain containers
-#     like this one.
-#   sudo cp .ci/leetcodeview-api.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now leetcodeview-api.service
-#
-# Deploys/updates go through deploy.sh (systemctl restart), not
-# `docker stack deploy` — see that file.
+# Pi variant of .ci/leetcodeview-api.service — same privilege set (nsjail's
+# --cgroupns=host / --security-opt requirements don't change with the host,
+# see that file's own header comment for the full validated reasoning), but:
+#   - no registry pull: builds/tags the image LOCALLY on the Pi (see
+#     .ci/deploy-pi.sh) as `leetcodeview:latest`, no `pizito:5001/` prefix —
+#     the Pi is a local test environment, not pizito (the real VPS); nothing
+#     has been pushed to pizito's registry from here.
+#   - `--network leetcodeview-net`, a plain user-defined BRIDGE network
+#     (`docker network create leetcodeview-net`), not the `proxy_net`
+#     Swarm overlay — the Pi's frontend is ALSO a plain container (see
+#     .ci/leetcodeview-fe.pi.service), not a Swarm service, so there is no
+#     Swarm on this host at all (see .ci/readme.md's "Pi" section for why).
+#   - `-p 8080:8080` published directly (no reverse proxy/Swarm ingress
+#     doing that on the Pi).
+#   - no EnvironmentFile — the Pi doesn't have pizito's
+#     /mnt/ssd/@docker/leetcodeview/.env; add one here if the Pi ever needs
+#     its own secrets/config beyond DOTNET_GCHeapHardLimit below.
 [Unit]
-Description=code2complexity API (Quarkus + sandbox-runner) — runs outside Swarm's service model, see this file's own header comment for why
+Description=code2complexity API (Pi, local test — no Swarm, no registry, see this file's own header comment)
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target
@@ -57,15 +27,6 @@ Restart=always
 RestartSec=5
 TimeoutStartSec=0
 
-# EnvironmentFile, not `docker run --env-file`: keeps secrets (registry
-# auth aside — pulling is deploy.sh's job, not this unit's) out of
-# `systemctl status`/`journalctl` process-listing output the way
-# --env-file's path alone doesn't leak but inline -e VAR=value would.
-EnvironmentFile=/mnt/ssd/@docker/leetcodeview/.env
-
-# Best-effort cleanup of a stale container from a previous run that
-# didn't get to ExecStop (e.g. host crash) — `-` prefix means a non-zero
-# exit here (nothing to remove) doesn't fail the unit start.
 ExecStartPre=-/usr/bin/docker rm -f leetcodeview-api
 
 ExecStart=/usr/bin/docker run --rm --name leetcodeview-api \
@@ -81,9 +42,10 @@ ExecStart=/usr/bin/docker run --rm --name leetcodeview-api \
   --security-opt systempaths=unconfined \
   --security-opt seccomp=unconfined \
   -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-  --network proxy_net \
+  --network leetcodeview-net \
+  -p 8080:8080 \
   -e DOTNET_GCHeapHardLimit=0x8000000 \
-  pizito:5001/leetcodeview:latest
+  leetcodeview:latest
 
 ExecStop=/usr/bin/docker stop -t 15 leetcodeview-api
 
