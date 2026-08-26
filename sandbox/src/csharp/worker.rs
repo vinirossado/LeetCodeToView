@@ -92,12 +92,16 @@ pub fn run_worker(dll_file: &Path) -> i32 {
     // em com/callback/mod.rs junto de STEP_SINK/ERROR_SINK).
     unsafe {
         RUN_START = Some(Instant::now());
-        com::STEP_SINK = Some(|line, locals, stack| {
+        com::STEP_SINK = Some(|line, locals, stack, frames| {
             let time_ns = RUN_START.map(|t0| t0.elapsed().as_nanos() as u64);
             events::emit(&Event::Step {
                 line,
                 locals,
                 stack,
+                frames: frames
+                    .into_iter()
+                    .map(|(name, locals)| events::FrameInfo { name, locals })
+                    .collect(),
                 time_ns,
                 memory_bytes: None,
             });

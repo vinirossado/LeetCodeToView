@@ -10,6 +10,17 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 
+/// One call-stack frame's name + locals, as carried per-step by `Event::
+/// Step::frames` below — same shape as jdi/Debugger.java's `frames` array
+/// entries (`{"name": ..., "locals": {...}}`), so the frontend
+/// (call-stack-panel.component.ts/variables-panel.component.ts, see
+/// tasks.md's per-frame-locals item) needs zero per-language handling.
+#[derive(Serialize)]
+pub struct FrameInfo {
+    pub name: String,
+    pub locals: BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub enum Event {
@@ -18,6 +29,14 @@ pub enum Event {
         line: i64,
         locals: BTreeMap<String, serde_json::Value>,
         stack: Vec<String>,
+        /// Per-frame `name`+`locals`, innermost-first (same order/index as
+        /// `stack`), capped at com/callback/stepping.rs's
+        /// MAX_FRAMES_WITH_LOCALS — lets the call-stack panel show any
+        /// frame's own locals when clicked, not just the innermost's (see
+        /// `locals` above, unchanged/backward-compatible). Mirrors
+        /// jdi/Debugger.java's `frames` field exactly (tasks.md's
+        /// Python-Tutor-inspired recursion-clarity item).
+        frames: Vec<FrameInfo>,
         time_ns: Option<u64>,
         memory_bytes: Option<u64>,
     },

@@ -33,9 +33,12 @@ export interface StepEvent {
    * (tasks.md's Python-Tutor-inspired recursion-clarity item), rather than
    * only ever the innermost frame's.
    *
-   * JAVA ONLY for now — `undefined` for C#/Ruby traces, which still only
-   * populate `locals`/`stack` above. Callers must fall back to `locals`
-   * when this is missing or a requested index is out of range (see
+   * Populated for all three languages (Java: jdi/Debugger.java; C#:
+   * sandbox/src/com/callback/stepping.rs's `walk_call_stack`; Ruby:
+   * sandbox/ruby/driver.rb's `frame_bindings`) — kept optional here
+   * defensively (a trace from before this shipped, or any future driver
+   * that doesn't populate it). Callers must fall back to `locals` when
+   * this is missing or a requested index is out of range (see
    * variables-panel.component.ts).
    */
   frames?: FrameInfo[];

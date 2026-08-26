@@ -11,15 +11,15 @@ use std::collections::BTreeMap;
 use std::os::raw::c_void;
 
 use super::super::icordebug::{
-    continue_, create_stepper, get_active_frame, get_call_stack_names, get_function, get_function_module,
-    get_function_token, get_il_offset, get_local_variable, step_into, step_range,
+    continue_, create_stepper, get_active_frame, get_caller, get_function, get_function_module, get_function_token,
+    get_il_offset, get_local_variable, get_metadata_import, step_into, step_range,
 };
 use super::super::values::{
     dereference, get_array_count, get_array_element_at, get_string_value, get_value_i32, get_value_type, is_null,
 };
 use super::super::{
-    query_interface, HResult, IID_ICORDEBUG_ARRAY_VALUE, IID_ICORDEBUG_IL_FRAME, IID_ICORDEBUG_REFERENCE_VALUE,
-    IID_ICORDEBUG_STRING_VALUE, S_OK,
+    get_method_name, query_interface, HResult, IID_ICORDEBUG_ARRAY_VALUE, IID_ICORDEBUG_IL_FRAME,
+    IID_ICORDEBUG_REFERENCE_VALUE, IID_ICORDEBUG_STRING_VALUE, S_OK,
 };
 use super::{
     LIMIT_SINK, LINE_RESOLVER, LOCAL_NAME_RESOLVER, SAMPLE_N, STEP_CAPPED, STEP_EVENTS_EMITTED, STEP_EVENTS_TOTAL,
@@ -97,6 +97,19 @@ pub(super) unsafe extern "C" fn cb_breakpoint(
 // legacy icordebug-spike binary, which has no `events` module.
 const STEP_EVENT_CAP: u32 = 5000;
 
+/// Cap on how many call-stack frames also get a full `locals` snapshot in
+/// the `frames` array (per-frame click-to-inspect in the call-stack panel,
+/// tasks.md's Python-Tutor-inspired recursion-clarity item) — port of
+/// jdi/Debugger.java's `MAX_FRAMES_WITH_LOCALS`, same value, same reasoning:
+/// frame *names* (the `stack` array) stay cheap to walk even at deep
+/// recursion (see get_caller's doc comment on the depth>50 guard below), but
+/// extracting every frame's full `locals` (GetLocalVariable per slot, plus a
+/// PDB `locals_for` lookup) is real per-frame cost that would reproduce the
+/// exact quadratic-growth blowup MAX_STACK_FRAMES's Java-side sibling
+/// constant already exists to avoid, just worse. 20 covers what a user could
+/// plausibly click through in the call-stack panel anyway.
+const MAX_FRAMES_WITH_LOCALS: usize = 20;
+
 /// Cada StepComplete inspeciona o frame atual e (sujeito a amostragem, ver
 /// abaixo) emite UM evento de step. Ao atingir o cap de 5.000 eventos
 /// EMITIDOS (`STEP_EVENT_CAP`, mesma decisão de escopo do lado Java — ver
@@ -159,7 +172,6 @@ pub(super) unsafe extern "C" fn cb_step_complete(
         STEP_EVENTS_TOTAL += 1;
         if STEP_EVENTS_TOTAL % SAMPLE_N.max(1) == 0 {
             if let Some((il_frame, offset, method_token, is_user_module)) = frame_info {
-                let stack = get_call_stack_names(il_frame);
                 // Real source line, resolved from the Portable PDB's
                 // SequencePoints blob (see pdb.rs) when possible — mirrors
                 // the granularity Java's JDI already gives for free (a real
@@ -177,8 +189,16 @@ pub(super) unsafe extern "C" fn cb_step_complete(
                 }
                 .unwrap_or(offset as i64);
                 let locals = extract_locals(il_frame, method_token, offset, is_user_module);
+                // walk_call_stack does ONE walk of GetCaller producing BOTH
+                // `stack` (frame names, same as the old get_call_stack_names)
+                // and `frames` (per-frame name+locals, capped at
+                // MAX_FRAMES_WITH_LOCALS) — reuses the innermost frame's
+                // already-computed `locals` above for frames[0] instead of
+                // re-extracting it, same efficiency move as
+                // jdi/Debugger.java's frameLocalsJson call for i==0.
+                let (stack, frames) = walk_call_stack(il_frame, locals.clone());
                 if let Some(sink) = STEP_SINK {
-                    sink(line, locals, stack);
+                    sink(line, locals, stack, frames);
                 }
                 STEP_EVENTS_EMITTED += 1;
                 if STEP_EVENTS_EMITTED >= STEP_EVENT_CAP {
@@ -236,6 +256,111 @@ unsafe fn dereference_value(value: *mut c_void) -> Result<Option<*mut c_void>, H
         return Ok(None);
     }
     Ok(Some(dereference(ref_value)?))
+}
+
+/// Walks the call stack from `start_frame` (an already-QI'd
+/// ICorDebugILFrame, e.g. from `query_interface(active_frame,
+/// IID_ICORDEBUG_IL_FRAME)`), producing BOTH the frame-name list (`stack`,
+/// same content/order/depth-cap `get_call_stack_names` used to compute
+/// separately) AND, for the first `MAX_FRAMES_WITH_LOCALS` frames, each
+/// frame's own `locals` (`frames`) — a single walk instead of two, since
+/// `ICorDebugFrame::GetCaller` is itself a real ICorDebug round trip per
+/// frame, same reasoning `cb_step_complete` already applies to
+/// `frame_info`.
+///
+/// `frame0_locals` lets the caller pass in the innermost frame's
+/// already-computed locals (from `extract_locals`, called separately for
+/// the backward-compatible top-level `locals` field) instead of this
+/// function re-extracting them — same "reuse frame 0" efficiency move as
+/// `jdi/Debugger.java`'s `frameLocalsJson` call for `i==0`.
+///
+/// Every OTHER frame (every caller past the innermost) is suspended at its
+/// own CALL SITE — the IL offset of the `call`/`callvirt` instruction that
+/// invoked the callee, i.e. exactly what `ICorDebugILFrame::GetIP` already
+/// returns for ANY frame, active or not. `pdb.rs::PortablePdb::locals_for`
+/// already takes `(method_token, il_offset)` as independent parameters (not
+/// hardcoded to the innermost frame), so resolving each caller's own local
+/// scope is a direct extension of the exact lookup already done for the
+/// active frame — verified by reading `locals_for`'s signature/body before
+/// writing this, not assumed.
+///
+/// `ICorDebugFrame::GetCaller` is only documented to return an
+/// `ICorDebugFrame`, not necessarily one that also implements
+/// `ICorDebugILFrame` (e.g. a native/internal/thunk frame has no managed IL
+/// view at all) — unlike name resolution (`GetFunction`/`GetCaller`, both
+/// part of the base `ICorDebugFrame` interface, safe to call on any frame
+/// kind), extracting locals needs `GetIP`/`GetLocalVariable`, both
+/// `ICorDebugILFrame`-specific. So, unlike the old `get_call_stack_names`
+/// (which never re-QI'd caller frames, safe there only because it never
+/// called an IL-frame-specific method on one), every non-innermost frame
+/// here goes through an explicit `query_interface(frame,
+/// IID_ICORDEBUG_IL_FRAME)` before touching `GetIP`/`GetLocalVariable`. When
+/// that QueryInterface fails for a given frame, that frame still gets a
+/// `name` (name resolution never needed the IL-frame view) but its `locals`
+/// comes back as an empty object — same honest-absence fallback as
+/// `jdi/Debugger.java`'s `frameLocalsJson` catching
+/// `AbsentInformationException` for a frame with no debug info.
+unsafe fn walk_call_stack(
+    start_frame: *mut c_void,
+    frame0_locals: BTreeMap<String, serde_json::Value>,
+) -> (Vec<String>, Vec<(String, BTreeMap<String, serde_json::Value>)>) {
+    let mut frame = start_frame;
+    let mut depth = 0usize;
+    let mut names = Vec::new();
+    let mut frames = Vec::new();
+    let mut frame0_locals = Some(frame0_locals);
+    loop {
+        let func = get_function(frame).ok();
+        let token = func.and_then(|f| get_function_token(f).ok());
+        let name = (|| {
+            let f = func?;
+            let module = get_function_module(f).ok()?;
+            let metadata = get_metadata_import(module).ok()?;
+            let t = token?;
+            get_method_name(metadata, t).ok()
+        })();
+        let name_str = match (&name, token) {
+            (Some(n), _) => n.clone(),
+            (None, Some(t)) => format!("token=0x{:08x}", t),
+            (None, None) => "<GetFunction falhou>".to_string(),
+        };
+        names.push(name_str.clone());
+
+        if depth < MAX_FRAMES_WITH_LOCALS {
+            let locals = match frame0_locals.take() {
+                Some(l) => l,
+                None => (|| -> Option<BTreeMap<String, serde_json::Value>> {
+                    let il_frame = query_interface(frame, &IID_ICORDEBUG_IL_FRAME).ok()?;
+                    let offset = get_il_offset(il_frame).ok()?;
+                    let method_token = token?;
+                    // Same USER_MODULE gating rule as frame_info's own
+                    // is_user_module above (see that comment for why) — a
+                    // caller frame landed in a framework module must not
+                    // get its locals resolved against the user's own PDB
+                    // just because rids can coincidentally collide across
+                    // modules.
+                    #[allow(static_mut_refs)]
+                    let is_user_module = !USER_MODULE.is_null()
+                        && func.and_then(|f| get_function_module(f).ok()) == Some(USER_MODULE);
+                    Some(extract_locals(il_frame, method_token, offset, is_user_module))
+                })()
+                .unwrap_or_default(),
+            };
+            frames.push((name_str, locals));
+        }
+
+        match get_caller(frame) {
+            Ok(Some(caller)) => {
+                frame = caller;
+                depth += 1;
+                if depth > 50 {
+                    break; // proteção contra pilha corrompida/recursão absurda
+                }
+            }
+            _ => break,
+        }
+    }
+    (names, frames)
 }
 
 /// Enumera as variáveis locais do frame (índice 0, 1, 2, ... até

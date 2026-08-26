@@ -6,10 +6,10 @@ import { expect, test } from './support/fixtures';
 // its core value proposition for teaching recursion. Before this fix, this
 // app's Variables panel always showed only the innermost frame's locals,
 // no matter which call-stack frame a user looked at or clicked — clicking
-// did nothing. JAVA ONLY for now (see StepEvent.frames's doc comment):
-// sandbox/jdi/Debugger.java now emits a `frames` array (name+locals per
-// frame, innermost-first) per step event; C#/Ruby still only carry the
-// single top-level `locals` field.
+// did nothing. This is the JAVA case (jdi/Debugger.java's `frames` array,
+// see StepEvent.frames's doc comment) — see
+// recursion-call-stack-csharp.spec.ts and recursion-call-stack-ruby.spec.ts
+// for the same validation against C#'s stepping.rs and Ruby's driver.rb.
 //
 // factorial(5), recursing down to the n<=1 base case, gives a real 6-deep
 // call stack (factorial x5 + main) with a DISTINCT `n` value per frame —

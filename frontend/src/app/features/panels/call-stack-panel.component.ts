@@ -22,17 +22,17 @@ import type { FrameInfo } from '../../core/models/execution-event.model';
  * should show on top).
  *
  * Click-to-inspect (Python-Tutor-inspired recursion-clarity item,
- * tasks.md): when the step's `frames` array is present (JAVA ONLY for
- * now — see execution-event.model.ts's `StepEvent.frames` doc comment),
- * each row becomes a real button; clicking it emits `frameSelect` with
- * that frame's index, and app.ts wires that into a shared
- * `selectedFrameIndex` signal the Variables panel also reads, so a
+ * tasks.md): when the step's `frames` array is present (Java, C#, and
+ * Ruby all populate it — see execution-event.model.ts's `StepEvent.frames`
+ * doc comment), each row becomes a real button; clicking it emits
+ * `frameSelect` with that frame's index, and app.ts wires that into a
+ * shared `selectedFrameIndex` signal the Variables panel also reads, so a
  * clicked frame's own locals are what gets shown there — instead of
  * always only the innermost frame's, no matter how deep the recursion.
- * For C#/Ruby traces (no `frames`), this falls back to the previous
- * plain, non-interactive list — there is no per-frame data to show yet,
- * so no click affordance is offered rather than one that would silently
- * do nothing.
+ * For any trace without `frames` (defensive fallback only at this point —
+ * see execution-event.model.ts), this falls back to the previous plain,
+ * non-interactive list — there is no per-frame data to show, so no click
+ * affordance is offered rather than one that would silently do nothing.
  */
 @Component({
   selector: 'app-call-stack-panel',

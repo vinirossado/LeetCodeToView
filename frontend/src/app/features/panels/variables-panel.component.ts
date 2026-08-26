@@ -15,8 +15,9 @@ function formatValue(value: unknown): string {
 
 /**
  * Renders locals for the currently viewed step — and, when `frames` is
- * available (JAVA ONLY for now, see execution-event.model.ts's
- * `StepEvent.frames` doc comment), for whichever call-stack frame is
+ * available (Java, C#, and Ruby all populate it — see
+ * execution-event.model.ts's `StepEvent.frames` doc comment), for
+ * whichever call-stack frame is
  * currently selected via `selectedFrameIndex` (see app.ts's
  * `selectedFrameIndex` signal and call-stack-panel.component.ts's
  * click-to-inspect), not just always the innermost frame — the

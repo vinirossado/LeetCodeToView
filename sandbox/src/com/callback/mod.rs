@@ -52,7 +52,18 @@ use super::{
 // função (sem estado capturado, então cabem em `fn` puro) antes de iniciar a
 // sessão de debug; o icordebug-spike nunca seta os sinks, então os callbacks
 // simplesmente não emitem nada nele (comportamento antigo preservado).
-pub static mut STEP_SINK: Option<fn(i64, std::collections::BTreeMap<String, serde_json::Value>, Vec<String>)> = None;
+// 4th param `frames`: per-frame `(name, locals)` pairs, innermost-first,
+// capped at stepping.rs's MAX_FRAMES_WITH_LOCALS — same
+// click-to-inspect-any-frame data jdi/Debugger.java's `frames` array already
+// carries for Java (see stepping.rs::walk_call_stack's doc comment).
+pub static mut STEP_SINK: Option<
+    fn(
+        i64,
+        std::collections::BTreeMap<String, serde_json::Value>,
+        Vec<String>,
+        Vec<(String, std::collections::BTreeMap<String, serde_json::Value>)>,
+    ),
+> = None;
 // Fires once, the moment the step cap below is reached, so run_worker can
 // emit Event::StepLimitExceeded (same product-scope decision as the Java
 // side — see jdi/Debugger.java and events::STEP_EVENT_CAP).

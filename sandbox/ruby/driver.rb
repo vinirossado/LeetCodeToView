@@ -43,6 +43,17 @@ MAX_DEPTH = 3
 MAX_ARRAY_ELEMENTS = 20
 MAX_FIELDS = 20
 MAX_STACK_FRAMES = 50
+# Cap on how many call-stack frames also get a full `locals` snapshot in the
+# `frames` array (per-frame click-to-inspect in the call-stack panel,
+# tasks.md's Python-Tutor-inspired recursion-clarity item) -- same value,
+# same reasoning as jdi/Debugger.java's MAX_FRAMES_WITH_LOCALS and
+# sandbox/src/com/callback/stepping.rs's Rust constant of the same name:
+# frame *names* (`stack`) stay cheap even at deep recursion (MAX_STACK_FRAMES
+# above already caps that separately), but walking every live frame's own
+# Binding#local_variables on EVERY step event is real per-frame cost this
+# driver would otherwise pay for frames far beyond what a user could
+# plausibly click through anyway.
+MAX_FRAMES_WITH_LOCALS = 20
 STEP_EVENT_CAP = 5000
 
 script_arg = ARGV[0]
@@ -154,6 +165,48 @@ end
 # Ruby já usa em backtraces de nível de topo (`prog.rb:3:in '<main>'`), não
 # inventado por este driver.
 call_stack = ['<main>']
+# Parallel array of Binding objects, ONE PER FRAME, pushed/popped in exact
+# lockstep with call_stack above (same :call/:return conditions, same
+# index order) -- this is what makes the NEW `frames` array below possible
+# (per-frame click-to-inspect locals, tasks.md's Python-Tutor-inspired
+# recursion-clarity item, already shipped for Java/C#).
+#
+# Verified empirically before writing this, not assumed (see tasks.md's own
+# note on this item, and this session's throwaway binding_test*.rb scripts):
+# a Ruby Binding is a LIVE reference into that call's actual local-variable
+# storage, not a value snapshot taken at the moment `binding`/`tp.binding`
+# was called. Two things confirmed directly:
+#   1. A binding captured once and read again LATER, after the underlying
+#      local has been reassigned, returns the CURRENT value, not the value
+#      at capture time -- so caching `tp.binding` at :call time (before the
+#      method body has even run) and reading `local_variable_get` from it
+#      much later (once execution is paused several frames deeper) still
+#      returns that FRAME's genuinely current value at the moment of the
+#      read, not a stale one.
+#   2. `local_variable_defined?`/`local_variable_get` on a binding captured
+#      at :call time (i.e. BEFORE any of the method body's own local
+#      assignments have executed) still see locals the method assigns
+#      LATER in its body -- Ruby pre-allocates local-variable slots for a
+#      whole lexical scope at parse time, initialized to nil, so this is
+#      not a race, it always works.
+#   3. Two concurrent (nested/recursive) invocations of the SAME method get
+#      genuinely INDEPENDENT Binding objects/local-variable storage -- a
+#      real 5-deep recursive `factorial`-shaped test, read back after the
+#      whole call chain unwound, showed each cached frame binding's own
+#      local with its OWN correct, distinct value (5,4,3,2,1), not the same
+#      value repeated or the innermost/final call's value bleeding into
+#      every frame.
+# Together these rule out the one failure mode that would have made this
+# feature WORSE than not shipping it at all (a per-frame locals view that
+# LOOKS real but silently shows stale/collapsed-to-innermost data) --
+# see this file's own emit_step/frame_locals below for how it's used.
+#
+# frame_bindings[0] ('<main>''s own binding) has no :call event to hang off
+# of (the top-level script executed via `load` below never fires :call for
+# itself) -- filled in lazily by the :line handler instead, the first time
+# (and every time, harmless -- see that handler) execution is observed back
+# at call_stack.size == 1.
+frame_bindings = [nil]
 emitted_count = 0
 capped = false
 t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
@@ -185,15 +238,41 @@ rescue StandardError
   nil
 end
 
-def emit_step(tp, call_stack, t0)
+# Serializa TODAS as local_variables visíveis num Binding -- mesma lógica
+# usada tanto pro `locals` de nível superior (frame ativo/innermost) quanto
+# pra cada entrada do novo `frames` abaixo (`frame_bindings`'s doc comment
+# tem a validação empírica de por que ler um Binding armazenado mais tarde
+# é seguro, não obsoleto).
+def frame_locals(b)
   locals = {}
-  tp.binding.local_variables.each do |name|
+  b.local_variables.each do |name|
     locals[name.to_s] =
       begin
-        serialize_value(tp.binding.local_variable_get(name), MAX_DEPTH, [])
+        serialize_value(b.local_variable_get(name), MAX_DEPTH, [])
       rescue StandardError
         nil
       end
+  end
+  locals
+end
+
+def emit_step(tp, call_stack, frame_bindings, t0)
+  locals = frame_locals(tp.binding)
+
+  # Innermost-first, same order/index as `stack` below (both come from
+  # reversing the same manually-tracked, lockstep-maintained arrays) --
+  # capped at MAX_FRAMES_WITH_LOCALS, tighter than MAX_STACK_FRAMES (see
+  # that constant's doc comment for why). Frame 0 reuses `locals` above
+  # (already computed from tp.binding, the live innermost frame) instead of
+  # re-walking it -- same efficiency move as jdi/Debugger.java's
+  # frameLocalsJson call for i==0 and stepping.rs's walk_call_stack.
+  reversed_names = call_stack.reverse
+  reversed_bindings = frame_bindings.reverse
+  frame_count = [reversed_names.size, MAX_FRAMES_WITH_LOCALS].min
+  frames = (0...frame_count).map do |i|
+    b = reversed_bindings[i]
+    frame_locals_hash = i.zero? ? locals : (b ? frame_locals(b) : {})
+    { name: reversed_names[i], locals: frame_locals_hash }
   end
 
   event = {
@@ -201,6 +280,7 @@ def emit_step(tp, call_stack, t0)
     line: tp.lineno,
     locals: locals,
     stack: build_stack(call_stack),
+    frames: frames,
     time_ns: Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond) - t0,
     memory_bytes: read_used_memory,
   }
@@ -222,18 +302,30 @@ call_tp = nil
 return_tp = nil
 
 call_tp = TracePoint.new(:call) do |tp|
-  call_stack.push(tp.method_id.to_s) if !capped && tp.path == SCRIPT_PATH
+  if !capped && tp.path == SCRIPT_PATH
+    call_stack.push(tp.method_id.to_s)
+    frame_bindings.push(tp.binding)
+  end
 end
 
 return_tp = TracePoint.new(:return) do |tp|
-  call_stack.pop if !capped && tp.path == SCRIPT_PATH && call_stack.size > 1
+  if !capped && tp.path == SCRIPT_PATH && call_stack.size > 1
+    call_stack.pop
+    frame_bindings.pop
+  end
 end
 
 line_tp = TracePoint.new(:line) do |tp|
   next if capped
   next unless tp.path == SCRIPT_PATH
 
-  emit_step(tp, call_stack, t0)
+  # '<main>' has no :call event of its own to capture a Binding from (see
+  # frame_bindings' doc comment above) -- kept fresh here instead, cheap
+  # (a live Binding is just a reference) and harmless to repeat every time
+  # we're observed back at the top level.
+  frame_bindings[0] = tp.binding if call_stack.size == 1
+
+  emit_step(tp, call_stack, frame_bindings, t0)
   emitted_count += 1
   if emitted_count >= STEP_EVENT_CAP
     capped = true
