@@ -59,19 +59,6 @@ const EXECUTION_NOT_FOUND_ERROR_MESSAGE = 'execution not found';
 /** localStorage key persisting the user's chosen editor/panels split ratio. */
 const SPLIT_RATIO_KEY = 'code2complexity.splitRatio';
 
-/**
- * localStorage key remembering whether the C# step-through disclaimer
- * (.csharp-note, see app.html) has been collapsed by the user. Mirrors
- * SPLIT_RATIO_KEY's "read current value on boot, persist it back on every
- * change" pattern rather than a one-shot "dismissed forever" flag: toggling
- * back open (e.g. to re-read the local_N/PDB details) also persists, so a
- * later reload doesn't re-collapse something the user just chose to expand
- * again. UX audit quick win #4 — the note itself is real, useful
- * information (not decorative), it just shouldn't cost vertical space on
- * every single C# run once someone has already read it.
- */
-const CSHARP_NOTE_COLLAPSED_KEY = 'code2complexity.csharpNoteDismissed';
-
 /** Fraction of the layout width given to the editor column; the resizer is clamped within this range. */
 const MIN_SPLIT_RATIO = 0.3;
 const MAX_SPLIT_RATIO = 0.75;
@@ -157,12 +144,6 @@ export class App {
   readonly shareCopyFailed = signal<boolean>(false);
   readonly shareFallbackUrl = signal<string | null>(null);
   private shareCopyFailedTimeout: ReturnType<typeof setTimeout> | null = null;
-
-  // UX audit quick win #4: whether the C# step-through disclaimer is
-  // collapsed to a one-line summary. Initialized from localStorage so a
-  // user who has already collapsed it once doesn't see the full banner
-  // (and pay its vertical-space cost) on every subsequent C# run.
-  readonly csharpNoteCollapsed = signal<boolean>(this.loadCsharpNoteCollapsed());
 
   // Set for exactly one effect run right after booting from a shared link
   // (?execution=<id>), so that one-time load does not get written into
@@ -503,22 +484,4 @@ export class App {
     return DEFAULT_SPLIT_RATIO;
   }
 
-  /**
-   * Flips the C# disclaimer between its full text and a compact one-line
-   * summary, persisting the new state so it's remembered on the next visit
-   * (see CSHARP_NOTE_COLLAPSED_KEY's doc comment for why this persists both
-   * directions instead of a one-shot "dismissed forever" flag).
-   */
-  toggleCsharpNote(): void {
-    const collapsed = !this.csharpNoteCollapsed();
-    this.csharpNoteCollapsed.set(collapsed);
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(CSHARP_NOTE_COLLAPSED_KEY, String(collapsed));
-    }
-  }
-
-  private loadCsharpNoteCollapsed(): boolean {
-    if (typeof localStorage === 'undefined') return false;
-    return localStorage.getItem(CSHARP_NOTE_COLLAPSED_KEY) === 'true';
-  }
 }

@@ -273,63 +273,6 @@
   height: 100%;
 }
 
-.csharp-note {
-  font-size: 0.8rem;
-  color: var(--c2c-text-secondary);
-  background: var(--c2c-warning-bg);
-  border: 1px solid var(--c2c-warning);
-  padding: var(--c2c-space-2) var(--c2c-space-3);
-  border-radius: var(--c2c-radius-sm);
-  margin: 0;
-}
-
-.csharp-note-body {
-  margin: var(--c2c-space-2) 0 0;
-}
-
-.csharp-note-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--c2c-space-2);
-}
-
-.csharp-note-title {
-  font-weight: 600;
-}
-
-/* Collapsed state: a single compact line instead of the full disclaimer,
- * so it stops costing vertical space above the editor on every C# run once
- * the user has already seen/dismissed it once (persisted, see
- * CSHARP_NOTE_COLLAPSED_KEY in app.ts). The full text is always one click
- * away again via the same toggle. */
-.csharp-note.collapsed {
-  padding: var(--c2c-space-1) var(--c2c-space-3);
-}
-
-.csharp-note-toggle {
-  background: transparent;
-  border: none;
-  color: inherit;
-  font: inherit;
-  font-size: 0.75rem;
-  font-weight: 500;
-  padding: 0;
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.csharp-note.collapsed .csharp-note-toggle {
-  text-decoration: none;
-  width: 100%;
-  text-align: left;
-}
-
-.csharp-note code {
-  font-family: var(--c2c-font-mono);
-}
-
 .error {
   color: var(--c2c-error);
   font-size: 0.85rem;

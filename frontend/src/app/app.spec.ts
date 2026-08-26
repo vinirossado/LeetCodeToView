@@ -468,58 +468,6 @@ describe('App', () => {
     });
   });
 
-  describe('C# step-through note (UX audit quick win #4: collapsible/dismissible)', () => {
-    function switchToCsharp(fixture: ReturnType<typeof create>) {
-      fixture.componentInstance.onLanguageChange({ target: { value: 'csharp' } } as unknown as Event);
-      fixture.detectChanges();
-    }
-
-    it('is expanded (not collapsed) by default when nothing was persisted yet', () => {
-      const fixture = create();
-      switchToCsharp(fixture);
-
-      expect(fixture.componentInstance.csharpNoteCollapsed()).toBe(false);
-      const note = fixture.nativeElement.querySelector('.csharp-note') as HTMLElement;
-      expect(note.textContent).toContain('local_N');
-    });
-
-    it('toggleCsharpNote collapses it and persists that to localStorage', () => {
-      const fixture = create();
-      switchToCsharp(fixture);
-
-      fixture.componentInstance.toggleCsharpNote();
-      fixture.detectChanges();
-
-      expect(fixture.componentInstance.csharpNoteCollapsed()).toBe(true);
-      expect(localStorage.getItem('code2complexity.csharpNoteDismissed')).toBe('true');
-
-      // Full text no longer forced on screen, but the toggle to bring it
-      // back is still there.
-      const note = fixture.nativeElement.querySelector('.csharp-note') as HTMLElement;
-      expect(note.textContent).not.toContain('ICorDebugStepper');
-      expect(fixture.nativeElement.querySelector('.csharp-note-toggle')).not.toBeNull();
-    });
-
-    it('a dismissal from a previous session stays collapsed on the next load', () => {
-      localStorage.setItem('code2complexity.csharpNoteDismissed', 'true');
-      const fixture = create();
-      switchToCsharp(fixture);
-
-      expect(fixture.componentInstance.csharpNoteCollapsed()).toBe(true);
-    });
-
-    it('toggling back open re-persists the expanded state, so the full note is still reachable and stays open on reload', () => {
-      localStorage.setItem('code2complexity.csharpNoteDismissed', 'true');
-      const fixture = create();
-      switchToCsharp(fixture);
-
-      fixture.componentInstance.toggleCsharpNote();
-
-      expect(fixture.componentInstance.csharpNoteCollapsed()).toBe(false);
-      expect(localStorage.getItem('code2complexity.csharpNoteDismissed')).toBe('false');
-    });
-  });
-
   describe('panel tabs', () => {
     it('defaults to the Variables tab (the one most referenced while stepping)', () => {
       const fixture = create();
