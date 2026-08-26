@@ -11,6 +11,18 @@ docker build -f .ci/Dockerfile -t leetcodeview:latest .
 echo "Building frontend image..."
 docker build -f .ci/Dockerfile.frontend -t leetcodeview-fe:latest .
 
+# Keep /etc/systemd/system in sync with the tracked unit files — a plain
+# `systemctl restart` reruns whatever was last installed there, silently
+# ignoring any edit to .ci/*.service until this runs (bit us for real: the
+# 127.0.0.1-only API bind fix landed in the repo but the Pi kept exposing
+# 0.0.0.0:8080 until the unit file was manually recopied).
+if ! diff -q .ci/leetcodeview-api.service /etc/systemd/system/leetcodeview-api.service >/dev/null 2>&1 || \
+   ! diff -q .ci/leetcodeview-fe.service /etc/systemd/system/leetcodeview-fe.service >/dev/null 2>&1; then
+    echo "Unit files changed, reinstalling..."
+    sudo cp .ci/leetcodeview-api.service .ci/leetcodeview-fe.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+fi
+
 echo "Restarting leetcodeview-api.service..."
 sudo systemctl restart leetcodeview-api.service
 

@@ -35,6 +35,9 @@ git pull
 ./deploy.sh
 ```
 
-Builda as duas imagens localmente, reinicia os dois serviços e espera o
-health check real de cada um. `api` fica em `localhost:8080`, `frontend`
-em `localhost:8081`.
+Builda as duas imagens localmente, reinstala os unit files em
+`/etc/systemd/system` se `.ci/*.service` mudou desde o último deploy (+
+`daemon-reload`), reinicia os dois serviços e espera o health check real
+de cada um. `frontend` fica exposto na rede em `:8081`; `api` é publicada
+só em `127.0.0.1:8080` — não é alcançável de fora do host, o `frontend` a
+alcança pela rede Docker interna (ver `.ci/nginx.frontend.conf`).
