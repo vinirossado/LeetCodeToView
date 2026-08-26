@@ -402,5 +402,55 @@ describe('TraceStoreService', () => {
       // If a second interval had been started, this would be on line 2 already.
       expect(store.currentStep()?.line).toBe(1);
     });
+
+    describe('playback speed (class doc decision 1: multiplier, 1x = 700ms base tick)', () => {
+      it('defaults to 1x', () => {
+        expect(store.playbackSpeed()).toBe(1);
+      });
+
+      it('a slower speed (0.5x) waits twice as long between ticks', () => {
+        store.setPlaybackSpeed(0.5);
+        store.play();
+
+        vi.advanceTimersByTime(700);
+        expect(store.currentStep()).toBeNull(); // not yet — 0.5x needs 1400ms
+        vi.advanceTimersByTime(700);
+        expect(store.currentStep()?.line).toBe(1);
+      });
+
+      it('the slowest speed (0.25x) waits four times as long between ticks', () => {
+        store.setPlaybackSpeed(0.25);
+        store.play();
+
+        vi.advanceTimersByTime(700 * 3);
+        expect(store.currentStep()).toBeNull();
+        vi.advanceTimersByTime(700);
+        expect(store.currentStep()?.line).toBe(1);
+      });
+
+      it('changing speed mid-playback restarts the timer at the new rate immediately (class doc decision 4)', () => {
+        store.play();
+        vi.advanceTimersByTime(700);
+        expect(store.currentStep()?.line).toBe(1);
+
+        store.setPlaybackSpeed(0.5);
+        // Old 1x-paced tick must not fire anymore.
+        vi.advanceTimersByTime(700);
+        expect(store.currentStep()?.line).toBe(1);
+        // New 0.5x tick (1400ms) fires next.
+        vi.advanceTimersByTime(700);
+        expect(store.currentStep()?.line).toBe(2);
+      });
+
+      it('changing speed while paused does not start playback', () => {
+        store.setPlaybackSpeed(0.25);
+        expect(store.isPlaying()).toBe(false);
+      });
+
+      it('ignores a value outside the allowed set', () => {
+        store.setPlaybackSpeed(2);
+        expect(store.playbackSpeed()).toBe(1);
+      });
+    });
   });
 });

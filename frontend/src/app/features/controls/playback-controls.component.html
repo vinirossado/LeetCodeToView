@@ -70,5 +70,13 @@
       <rect x="11.5" y="3" width="1.5" height="10" />
     </svg>
   </button>
+  <label class="speed-select" title="Velocidade da reprodução automática">
+    <span class="visually-hidden">Velocidade</span>
+    <select (change)="onSpeedChange($event)">
+      @for (speed of speedOptions; track speed) {
+        <option [value]="speed" [selected]="speed === playbackSpeed()">{{ speed }}x</option>
+      }
+    </select>
+  </label>
   <span class="count">{{ totalSteps() }} passos no trace</span>
 </div>

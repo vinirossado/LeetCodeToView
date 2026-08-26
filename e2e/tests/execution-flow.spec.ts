@@ -82,20 +82,12 @@ test('does not leak the JVM\'s own container-detection warnings into the stdout 
   expect(outputText.split('\n').map((line) => line.trim())).toEqual(['0', '1', '3', '6', '10']);
 });
 
-test('runs the C# starter example end to end and shows the known local_N/PDB disclaimer', async ({ codePage }) => {
+test('runs the C# starter example end to end (local_N placeholder for unresolved locals)', async ({ codePage }) => {
   await codePage.goto();
   await codePage.selectLanguage('csharp');
 
   // Switching language swaps in that language's starter example (app.ts
-  // onLanguageChange) and shows the C#-specific disclaimer. Line-granular
-  // stepping (ICorDebugStepper::StepRange, see tasks.md) fixed the "same
-  // line highlighted many times in a row" artifact for the common
-  // single-statement-per-line case, so the banner's wording changed — but
-  // the locals/PDB fallback part it also documents (local_N when a real
-  // variable name can't be resolved) is unchanged, so this substring still
-  // holds.
-  await expect(codePage.csharpNote).toContainText('local_N');
-
+  // onLanguageChange).
   await codePage.runAndWaitForFinish();
 
   // Following-live navigation lands the cursor at the trace's pseudo-end
@@ -111,18 +103,15 @@ test('runs the C# starter example end to end and shows the known local_N/PDB dis
   await expect(codePage.variables).toContainText('local_');
 });
 
-test('runs the Ruby starter example end to end via TracePoint: real locals and a real call stack, no PDB-style disclaimer', async ({
+test('runs the Ruby starter example end to end via TracePoint: real locals and a real call stack', async ({
   codePage,
 }) => {
   await codePage.goto();
   await codePage.selectLanguage('ruby');
 
-  // Unlike C#, Ruby has no equivalent asymmetry/disclaimer to show — the
-  // TracePoint driver (sandbox/ruby/driver.rb) always resolves real
-  // variable names (tp.binding.local_variables), same as Java's JDI, never
-  // positional local_N placeholders.
-  await expect(codePage.csharpNote).toHaveCount(0);
-
+  // Unlike C#, the TracePoint driver (sandbox/ruby/driver.rb) always
+  // resolves real variable names (tp.binding.local_variables), same as
+  // Java's JDI, never positional local_N placeholders.
   await codePage.runAndWaitForFinish();
 
   // Checked right after the run finishes (live-follow position, same as

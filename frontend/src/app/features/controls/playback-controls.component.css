@@ -43,8 +43,33 @@ button:disabled {
   cursor: default;
 }
 
-.count {
+.speed-select {
   margin-left: auto;
+}
+
+.speed-select select {
+  background: var(--c2c-bg-panel);
+  color: var(--c2c-text);
+  border: 1px solid var(--c2c-border);
+  border-radius: var(--c2c-radius-sm);
+  padding: 0.3em 0.4em;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.count {
   font-size: 0.8rem;
   color: var(--c2c-text-muted);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

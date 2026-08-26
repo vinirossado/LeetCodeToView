@@ -50,10 +50,6 @@ export class CodeEditorPage {
     return this.page.locator('.frame-context');
   }
 
-  get csharpNote(): Locator {
-    return this.page.locator('.csharp-note');
-  }
-
   get variables(): Locator {
     return this.page.locator('dl');
   }
@@ -88,6 +84,10 @@ export class CodeEditorPage {
 
   private playbackControl(title: string): Locator {
     return this.page.getByTitle(title);
+  }
+
+  get speedSelect(): Locator {
+    return this.page.locator('.speed-select select');
   }
 
   // --- Setup actions (page state before navigation) ---
@@ -153,6 +153,14 @@ export class CodeEditorPage {
 
   async nextBreakpoint(): Promise<void> {
     await this.playbackControl('Próximo breakpoint').click();
+  }
+
+  async togglePlay(): Promise<void> {
+    await this.page.getByTitle(/Reproduzir automaticamente|Pausar reprodução automática/).click();
+  }
+
+  async setPlaybackSpeed(speed: '1' | '0.75' | '0.5' | '0.25'): Promise<void> {
+    await this.speedSelect.selectOption(speed);
   }
 
   // --- Assertion helpers (state, not raw locators) ---

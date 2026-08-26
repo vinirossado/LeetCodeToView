@@ -99,4 +99,38 @@ describe('PlaybackControlsComponent', () => {
       expect(button(fixture, 'Reproduzir automaticamente').disabled).toBe(true);
     });
   });
+
+  describe('playback speed select', () => {
+    function select(fixture: ReturnType<typeof create>): HTMLSelectElement {
+      return fixture.nativeElement.querySelector('.speed-select select');
+    }
+
+    it('defaults to 1x and lists all four speed options', () => {
+      const fixture = create();
+      const el = select(fixture);
+      expect(el.value).toBe('1');
+      const optionValues = Array.from(el.options).map((o) => o.value);
+      expect(optionValues).toEqual(['1', '0.75', '0.5', '0.25']);
+    });
+
+    it('reflects the playbackSpeed input', () => {
+      TestBed.configureTestingModule({ imports: [PlaybackControlsComponent] });
+      const fixture = TestBed.createComponent(PlaybackControlsComponent);
+      fixture.componentRef.setInput('playbackSpeed', 0.5);
+      fixture.detectChanges();
+      expect(select(fixture).value).toBe('0.5');
+    });
+
+    it('emits speedChange with the numeric value when changed', () => {
+      const fixture = create();
+      const speedChange = vi.fn();
+      fixture.componentInstance.speedChange.subscribe(speedChange);
+
+      const el = select(fixture);
+      el.value = '0.25';
+      el.dispatchEvent(new Event('change'));
+
+      expect(speedChange).toHaveBeenCalledWith(0.25);
+    });
+  });
 });

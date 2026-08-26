@@ -14,11 +14,16 @@ import { Component, input, output } from '@angular/core';
   styleUrl: './playback-controls.component.css',
 })
 export class PlaybackControlsComponent {
+  /** Allowed speed multipliers — mirrors TraceStoreService.PLAYBACK_SPEEDS (kept as a plain literal here to avoid a service import in a pure presentational component). */
+  readonly speedOptions = [1, 0.75, 0.5, 0.25] as const;
+
   readonly hasStarted = input<boolean>(false);
   readonly atEnd = input<boolean>(false);
   readonly totalSteps = input<number>(0);
   /** Whether autoplay is currently running — flips the play/pause button's icon and label. */
   readonly isPlaying = input<boolean>(false);
+  /** Current autoplay speed multiplier — reflected in the speed <select>. */
+  readonly playbackSpeed = input<number>(1);
 
   readonly stepForward = output<void>();
   readonly stepBack = output<void>();
@@ -28,4 +33,11 @@ export class PlaybackControlsComponent {
   readonly runToPreviousBreakpoint = output<void>();
   /** Emitted when the play/pause button is clicked — the parent/service owns the actual start/stop logic. */
   readonly togglePlay = output<void>();
+  /** Emitted with the newly selected speed multiplier when the speed <select> changes. */
+  readonly speedChange = output<number>();
+
+  onSpeedChange(event: Event): void {
+    const value = Number((event.target as HTMLSelectElement).value);
+    this.speedChange.emit(value);
+  }
 }

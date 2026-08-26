@@ -41,9 +41,15 @@ import type { ExecutionStatus } from '../models/execution.model';
  * Autoplay: since the whole trace is already buffered client-side,
  * "playing" it back is nothing more than calling stepForward() on a
  * `setInterval` (see `play`/`pause`/`autoplayTick` below) — no server
- * involvement, same as every other navigation method in this class. Three
+ * involvement, same as every other navigation method in this class. Four
  * behavioral decisions were made here (see tasks.md for the write-up):
- *   1. Fixed speed only (AUTOPLAY_INTERVAL_MS), no speed selector yet.
+ *   1. Speed is a multiplier on the base interval (BASE_AUTOPLAY_INTERVAL_MS
+ *      / speed), same convention as video-player playback-speed controls
+ *      (YouTube, VLC): 1x is normal, fractional values below 1 make each
+ *      step wait longer (slower, easier to follow line-by-line), not
+ *      shorter — see `setPlaybackSpeed`. Restricted to a fixed allowed set
+ *      (PLAYBACK_SPEEDS) rather than an arbitrary number, mirroring those
+ *      same players' preset-tier speed menus.
  *   2. Autoplay stops automatically the moment it lands on a breakpointed
  *      line, mirroring what a real debugger's "run" does at a breakpoint —
  *      chosen over "ignore breakpoints and just march through" because this
@@ -55,6 +61,10 @@ import type { ExecutionStatus } from '../models/execution.model';
  *      having each of those *public* methods call `pause()` before doing
  *      its own thing; `autoplayTick` itself calls the private `landOn`
  *      directly so it doesn't pause itself on every tick.
+ *   4. Changing speed while already playing takes effect immediately (the
+ *      running interval is torn down and restarted at the new rate) instead
+ *      of only applying on the next `play()` call — waiting would make the
+ *      control feel unresponsive if you change your mind mid-playback.
  */
 @Injectable({ providedIn: 'root' })
 export class TraceStoreService implements OnDestroy {
@@ -68,8 +78,11 @@ export class TraceStoreService implements OnDestroy {
   private readonly isPlayingSig = signal<boolean>(false);
   /** Handle for the autoplay `setInterval`, or null while not playing. */
   private playTimerId: ReturnType<typeof setInterval> | null = null;
-  /** Fixed autoplay speed — not user-configurable yet, see class doc / tasks.md. */
-  private static readonly AUTOPLAY_INTERVAL_MS = 700;
+  /** Interval at 1x speed — see `setPlaybackSpeed` and class doc decision 1. */
+  private static readonly BASE_AUTOPLAY_INTERVAL_MS = 700;
+  /** Allowed speed multipliers, video-player convention (class doc decision 1). */
+  static readonly PLAYBACK_SPEEDS = [1, 0.75, 0.5, 0.25] as const;
+  private readonly playbackSpeedSig = signal<number>(1);
 
   readonly events = this.eventsSig.asReadonly();
   readonly status = this.statusSig.asReadonly();
@@ -77,6 +90,7 @@ export class TraceStoreService implements OnDestroy {
   readonly isFollowingLive = this.followLiveSig.asReadonly();
   readonly landedViaBreakpoint = this.landedViaBreakpointSig.asReadonly();
   readonly isPlaying = this.isPlayingSig.asReadonly();
+  readonly playbackSpeed = this.playbackSpeedSig.asReadonly();
 
   readonly steps = computed<StepEvent[]>(() => this.eventsSig().filter(isStepEvent));
   readonly totalSteps = computed(() => this.steps().length);
@@ -207,15 +221,15 @@ export class TraceStoreService implements OnDestroy {
   }
 
   /**
-   * Starts autoplay: steps forward once every AUTOPLAY_INTERVAL_MS until it
-   * either reaches the end of the trace or lands on a breakpointed line
-   * (see class doc, decisions 1-2). No-op if already playing or if there's
-   * nothing left to step into.
+   * Starts autoplay: steps forward once every tick (BASE_AUTOPLAY_INTERVAL_MS
+   * / playbackSpeed) until it either reaches the end of the trace or lands
+   * on a breakpointed line (see class doc, decisions 1-2). No-op if already
+   * playing or if there's nothing left to step into.
    */
   play(): void {
     if (this.isPlayingSig() || this.atEnd() || this.totalSteps() === 0) return;
     this.isPlayingSig.set(true);
-    this.playTimerId = setInterval(() => this.autoplayTick(), TraceStoreService.AUTOPLAY_INTERVAL_MS);
+    this.playTimerId = setInterval(() => this.autoplayTick(), this.currentIntervalMs());
   }
 
   /** Stops autoplay (idempotent — safe to call whether or not it's currently playing). */
@@ -233,6 +247,27 @@ export class TraceStoreService implements OnDestroy {
     } else {
       this.play();
     }
+  }
+
+  /**
+   * Sets the autoplay speed multiplier (class doc decision 1) — silently
+   * ignores a value outside PLAYBACK_SPEEDS rather than throwing, since this
+   * is driven directly by a UI select whose options are hardcoded to that
+   * same set. If autoplay is currently running, restarts the interval at the
+   * new rate immediately (class doc decision 4) instead of waiting for the
+   * next `play()`.
+   */
+  setPlaybackSpeed(speed: number): void {
+    if (!(TraceStoreService.PLAYBACK_SPEEDS as readonly number[]).includes(speed)) return;
+    this.playbackSpeedSig.set(speed);
+    if (this.playTimerId !== null) {
+      clearInterval(this.playTimerId);
+      this.playTimerId = setInterval(() => this.autoplayTick(), this.currentIntervalMs());
+    }
+  }
+
+  private currentIntervalMs(): number {
+    return TraceStoreService.BASE_AUTOPLAY_INTERVAL_MS / this.playbackSpeedSig();
   }
 
   /**

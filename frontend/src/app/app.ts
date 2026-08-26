@@ -184,6 +184,7 @@ export class App {
   readonly breakpoints = this.trace.breakpoints;
   readonly landedViaBreakpoint = this.trace.landedViaBreakpoint;
   readonly isPlaying = this.trace.isPlaying;
+  readonly playbackSpeed = this.trace.playbackSpeed;
 
   readonly currentLine = computed(() => this.currentStep()?.line ?? null);
   readonly currentStack = computed(() => this.currentStep()?.stack ?? null);
@@ -378,6 +379,10 @@ export class App {
 
   togglePlay(): void {
     this.trace.togglePlay();
+  }
+
+  setPlaybackSpeed(speed: number): void {
+    this.trace.setPlaybackSpeed(speed);
   }
 
   /**
