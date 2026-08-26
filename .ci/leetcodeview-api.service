@@ -14,6 +14,16 @@
 #
 # Image is built LOCALLY (see deploy.sh), not pulled from a registry —
 # there's no registry in this deploy.
+#
+# Bound to 127.0.0.1 only (not 0.0.0.0) — the frontend reaches this
+# container over `leetcodeview-net` by its `--name`, so the host port is
+# only for local debugging (curl from the Pi itself). Publishing this on
+# all interfaces would put an unauthenticated, privileged (SYS_ADMIN +
+# cgroupns=host + seccomp=unconfined, required by nsjail — see
+# spec.md's "Isolamento de execução: nsjail") arbitrary-code-execution
+# endpoint directly on the network, bypassing both nginx and the
+# per-IP rate limiter (RateLimitingFilter.java assumes nginx is the only
+# thing that can reach this container directly).
 [Unit]
 Description=code2complexity API
 After=docker.service network-online.target
@@ -42,7 +52,7 @@ ExecStart=/usr/bin/docker run --rm --name leetcodeview-api \
   --security-opt seccomp=unconfined \
   -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
   --network leetcodeview-net \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   -e DOTNET_GCHeapHardLimit=0x8000000 \
   leetcodeview:latest
 
