@@ -43,13 +43,15 @@ import type { ExecutionStatus } from '../models/execution.model';
  * `setInterval` (see `play`/`pause`/`autoplayTick` below) — no server
  * involvement, same as every other navigation method in this class. Four
  * behavioral decisions were made here (see tasks.md for the write-up):
- *   1. Speed is a multiplier on the base interval (BASE_AUTOPLAY_INTERVAL_MS
- *      / speed), same convention as video-player playback-speed controls
- *      (YouTube, VLC): 1x is normal, fractional values below 1 make each
- *      step wait longer (slower, easier to follow line-by-line), not
- *      shorter — see `setPlaybackSpeed`. Restricted to a fixed allowed set
- *      (PLAYBACK_SPEEDS) rather than an arbitrary number, mirroring those
- *      same players' preset-tier speed menus.
+ *   1. Speed selects a per-tier interval (INTERVAL_MS_BY_SPEED) — 1x is the
+ *      original 700ms "normal" pace; 0.75x/0.5x/0.25x are hand-tuned, NOT a
+ *      straight multiplier of it (700/speed). A straight multiplier was
+ *      tried first and rejected: real feedback was that 0.25x (700/0.25 =
+ *      2.8s/step under that formula) was still too fast to comfortably
+ *      follow line-by-line, and the fix explicitly asked for was "make
+ *      0.25x/0.5x themselves slower", not "add more tiers" — so the lower
+ *      tiers are pulled disproportionately slower than a linear scale would
+ *      give, while 1x stays exactly what it always was.
  *   2. Autoplay stops automatically the moment it lands on a breakpointed
  *      line, mirroring what a real debugger's "run" does at a breakpoint —
  *      chosen over "ignore breakpoints and just march through" because this
@@ -78,14 +80,18 @@ export class TraceStoreService implements OnDestroy {
   private readonly isPlayingSig = signal<boolean>(false);
   /** Handle for the autoplay `setInterval`, or null while not playing. */
   private playTimerId: ReturnType<typeof setInterval> | null = null;
-  /** Interval at 1x speed — see `setPlaybackSpeed` and class doc decision 1. */
-  private static readonly BASE_AUTOPLAY_INTERVAL_MS = 700;
   /**
-   * Allowed speed multipliers, video-player convention (class doc decision
-   * 1). Extended down to 0.1x/0.05x (7s/14s per step) after 0.25x (2.8s)
-   * was reported as still too fast to comfortably follow line-by-line.
+   * Autoplay tick interval per speed tier — hand-tuned, not a formula (see
+   * class doc decision 1). 1x is the original/unchanged "normal" pace.
    */
-  static readonly PLAYBACK_SPEEDS = [1, 0.75, 0.5, 0.25, 0.1, 0.05] as const;
+  private static readonly INTERVAL_MS_BY_SPEED: Readonly<Record<number, number>> = {
+    1: 700,
+    0.75: 1400,
+    0.5: 4000,
+    0.25: 12000,
+  };
+  /** Allowed speed multipliers — keys of INTERVAL_MS_BY_SPEED, video-player-style preset tiers (class doc decision 1). */
+  static readonly PLAYBACK_SPEEDS = [1, 0.75, 0.5, 0.25] as const;
   private readonly playbackSpeedSig = signal<number>(1);
 
   readonly events = this.eventsSig.asReadonly();
@@ -225,10 +231,10 @@ export class TraceStoreService implements OnDestroy {
   }
 
   /**
-   * Starts autoplay: steps forward once every tick (BASE_AUTOPLAY_INTERVAL_MS
-   * / playbackSpeed) until it either reaches the end of the trace or lands
-   * on a breakpointed line (see class doc, decisions 1-2). No-op if already
-   * playing or if there's nothing left to step into.
+   * Starts autoplay: steps forward once every tick (INTERVAL_MS_BY_SPEED
+   * for the current speed) until it either reaches the end of the trace or
+   * lands on a breakpointed line (see class doc, decisions 1-2). No-op if
+   * already playing or if there's nothing left to step into.
    */
   play(): void {
     if (this.isPlayingSig() || this.atEnd() || this.totalSteps() === 0) return;
@@ -271,7 +277,7 @@ export class TraceStoreService implements OnDestroy {
   }
 
   private currentIntervalMs(): number {
-    return TraceStoreService.BASE_AUTOPLAY_INTERVAL_MS / this.playbackSpeedSig();
+    return TraceStoreService.INTERVAL_MS_BY_SPEED[this.playbackSpeedSig()];
   }
 
   /**

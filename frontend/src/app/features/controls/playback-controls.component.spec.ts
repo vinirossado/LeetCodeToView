@@ -105,12 +105,12 @@ describe('PlaybackControlsComponent', () => {
       return fixture.nativeElement.querySelector('.speed-select select');
     }
 
-    it('defaults to 1x and lists all six speed options', () => {
+    it('defaults to 1x and lists all four speed options', () => {
       const fixture = create();
       const el = select(fixture);
       expect(el.value).toBe('1');
       const optionValues = Array.from(el.options).map((o) => o.value);
-      expect(optionValues).toEqual(['1', '0.75', '0.5', '0.25', '0.1', '0.05']);
+      expect(optionValues).toEqual(['1', '0.75', '0.5', '0.25']);
     });
 
     it('reflects the playbackSpeed input', () => {

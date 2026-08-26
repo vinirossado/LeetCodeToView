@@ -403,38 +403,38 @@ describe('TraceStoreService', () => {
       expect(store.currentStep()?.line).toBe(1);
     });
 
-    describe('playback speed (class doc decision 1: multiplier, 1x = 700ms base tick)', () => {
-      it('defaults to 1x', () => {
+    describe('playback speed (class doc decision 1: hand-tuned per-tier interval, not a straight multiplier)', () => {
+      it('defaults to 1x (700ms tick, unchanged)', () => {
         expect(store.playbackSpeed()).toBe(1);
       });
 
-      it('a slower speed (0.5x) waits twice as long between ticks', () => {
+      it('0.75x waits 1400ms between ticks', () => {
+        store.setPlaybackSpeed(0.75);
+        store.play();
+
+        vi.advanceTimersByTime(1399);
+        expect(store.currentStep()).toBeNull();
+        vi.advanceTimersByTime(1);
+        expect(store.currentStep()?.line).toBe(1);
+      });
+
+      it('0.5x waits 4000ms between ticks', () => {
         store.setPlaybackSpeed(0.5);
         store.play();
 
-        vi.advanceTimersByTime(700);
-        expect(store.currentStep()).toBeNull(); // not yet — 0.5x needs 1400ms
-        vi.advanceTimersByTime(700);
+        vi.advanceTimersByTime(3999);
+        expect(store.currentStep()).toBeNull();
+        vi.advanceTimersByTime(1);
         expect(store.currentStep()?.line).toBe(1);
       });
 
-      it('0.25x waits four times as long between ticks', () => {
+      it('the slowest speed (0.25x) waits 12000ms between ticks', () => {
         store.setPlaybackSpeed(0.25);
         store.play();
 
-        vi.advanceTimersByTime(700 * 3);
+        vi.advanceTimersByTime(11999);
         expect(store.currentStep()).toBeNull();
-        vi.advanceTimersByTime(700);
-        expect(store.currentStep()?.line).toBe(1);
-      });
-
-      it('the slowest speed (0.05x) waits twenty times as long between ticks', () => {
-        store.setPlaybackSpeed(0.05);
-        store.play();
-
-        vi.advanceTimersByTime(700 * 19);
-        expect(store.currentStep()).toBeNull();
-        vi.advanceTimersByTime(700);
+        vi.advanceTimersByTime(1);
         expect(store.currentStep()?.line).toBe(1);
       });
 
@@ -447,8 +447,8 @@ describe('TraceStoreService', () => {
         // Old 1x-paced tick must not fire anymore.
         vi.advanceTimersByTime(700);
         expect(store.currentStep()?.line).toBe(1);
-        // New 0.5x tick (1400ms) fires next.
-        vi.advanceTimersByTime(700);
+        // New 0.5x tick (4000ms) fires next.
+        vi.advanceTimersByTime(3300);
         expect(store.currentStep()?.line).toBe(2);
       });
 

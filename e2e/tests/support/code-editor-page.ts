@@ -159,7 +159,7 @@ export class CodeEditorPage {
     await this.page.getByTitle(/Reproduzir automaticamente|Pausar reprodução automática/).click();
   }
 
-  async setPlaybackSpeed(speed: '1' | '0.75' | '0.5' | '0.25' | '0.1' | '0.05'): Promise<void> {
+  async setPlaybackSpeed(speed: '1' | '0.75' | '0.5' | '0.25'): Promise<void> {
     await this.speedSelect.selectOption(speed);
   }
 
