@@ -418,11 +418,21 @@ describe('TraceStoreService', () => {
         expect(store.currentStep()?.line).toBe(1);
       });
 
-      it('the slowest speed (0.25x) waits four times as long between ticks', () => {
+      it('0.25x waits four times as long between ticks', () => {
         store.setPlaybackSpeed(0.25);
         store.play();
 
         vi.advanceTimersByTime(700 * 3);
+        expect(store.currentStep()).toBeNull();
+        vi.advanceTimersByTime(700);
+        expect(store.currentStep()?.line).toBe(1);
+      });
+
+      it('the slowest speed (0.05x) waits twenty times as long between ticks', () => {
+        store.setPlaybackSpeed(0.05);
+        store.play();
+
+        vi.advanceTimersByTime(700 * 19);
         expect(store.currentStep()).toBeNull();
         vi.advanceTimersByTime(700);
         expect(store.currentStep()?.line).toBe(1);

@@ -29,7 +29,7 @@ test('playback speed select defaults to 1x and lists all options', async ({ code
   const optionValues = await codePage.speedSelect.locator('option').evaluateAll((opts) =>
     opts.map((o) => (o as HTMLOptionElement).value),
   );
-  expect(optionValues).toEqual(['1', '0.75', '0.5', '0.25']);
+  expect(optionValues).toEqual(['1', '0.75', '0.5', '0.25', '0.1', '0.05']);
 });
 
 test("choosing a slower speed measurably delays autoplay's first step vs 1x", async ({ codePage }) => {

@@ -15,7 +15,7 @@ import { Component, input, output } from '@angular/core';
 })
 export class PlaybackControlsComponent {
   /** Allowed speed multipliers — mirrors TraceStoreService.PLAYBACK_SPEEDS (kept as a plain literal here to avoid a service import in a pure presentational component). */
-  readonly speedOptions = [1, 0.75, 0.5, 0.25] as const;
+  readonly speedOptions = [1, 0.75, 0.5, 0.25, 0.1, 0.05] as const;
 
   readonly hasStarted = input<boolean>(false);
   readonly atEnd = input<boolean>(false);

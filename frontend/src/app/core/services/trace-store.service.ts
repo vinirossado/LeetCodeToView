@@ -80,8 +80,12 @@ export class TraceStoreService implements OnDestroy {
   private playTimerId: ReturnType<typeof setInterval> | null = null;
   /** Interval at 1x speed — see `setPlaybackSpeed` and class doc decision 1. */
   private static readonly BASE_AUTOPLAY_INTERVAL_MS = 700;
-  /** Allowed speed multipliers, video-player convention (class doc decision 1). */
-  static readonly PLAYBACK_SPEEDS = [1, 0.75, 0.5, 0.25] as const;
+  /**
+   * Allowed speed multipliers, video-player convention (class doc decision
+   * 1). Extended down to 0.1x/0.05x (7s/14s per step) after 0.25x (2.8s)
+   * was reported as still too fast to comfortably follow line-by-line.
+   */
+  static readonly PLAYBACK_SPEEDS = [1, 0.75, 0.5, 0.25, 0.1, 0.05] as const;
   private readonly playbackSpeedSig = signal<number>(1);
 
   readonly events = this.eventsSig.asReadonly();
